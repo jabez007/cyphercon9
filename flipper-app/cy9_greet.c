@@ -23,16 +23,18 @@ typedef struct {
     uint32_t total_bits;
 } Cy9TxContext;
 
+static Cy9TxContext tx_ctx;
+
 static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* duration, bool* level) {
-    Cy9TxContext* tx_ctx = context;
+    Cy9TxContext* ctx = context;
     
-    if(tx_ctx->bit_index >= tx_ctx->total_bits) {
+    if(ctx->bit_index >= ctx->total_bits) {
         return FuriHalInfraredTxGetDataStateLastDone;
     }
     
-    uint32_t byte_index = tx_ctx->bit_index / 10;
-    uint32_t bit_in_byte = tx_ctx->bit_index % 10;
-    uint8_t byte = tx_ctx->packet[byte_index];
+    uint32_t byte_index = ctx->bit_index / 10;
+    uint32_t bit_in_byte = ctx->bit_index % 10;
+    uint8_t byte = ctx->packet[byte_index];
     
     bool bit_val;
     if(bit_in_byte == 0) { // Start bit (0)
@@ -46,9 +48,9 @@ static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* du
     *duration = BIT_TIME_US;
     *level = !bit_val; // bit 0 = IR ON, bit 1 = IR OFF
     
-    tx_ctx->bit_index++;
+    ctx->bit_index++;
     
-    if(tx_ctx->bit_index >= tx_ctx->total_bits) {
+    if(ctx->bit_index >= ctx->total_bits) {
         return FuriHalInfraredTxGetDataStateDone;
     }
     
@@ -56,7 +58,11 @@ static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* du
 }
 
 void cy9_broadcast_greeting() {
-    Cy9TxContext tx_ctx;
+    // If IR is somehow busy, stop it first to satisfy furi_check
+    if(furi_hal_infrared_is_busy()) {
+        furi_hal_infrared_async_tx_stop();
+    }
+
     uint16_t body_len = 32;
     uint8_t event_id = 4; // Broadcast
     uint16_t from_id = 0; // Ghost
@@ -71,7 +77,7 @@ void cy9_broadcast_greeting() {
         memcpy(alias_buf, flipper_name, name_len);
     }
 
-    const char* msg = "Ukttzm ykgd En9!";   // 16 bytes
+    const char* msg = "Greetz from Cy9!";   // 16 bytes
 
     uint8_t tx_buffer[47] = {0};
     // Build packet as the badge does (Big Endian fields)
@@ -91,7 +97,7 @@ void cy9_broadcast_greeting() {
     tx_buffer[6] = (tally >> 8) & 0xFF;
     tx_buffer[7] = tally & 0xFF;
     
-    // Reverse the packet for transmission
+    // Reverse the packet for transmission (wire order)
     for(int i = 0; i < 47; i++) {
         tx_ctx.packet[i] = tx_buffer[46 - i];
     }
@@ -99,15 +105,10 @@ void cy9_broadcast_greeting() {
     tx_ctx.bit_index = 0;
     tx_ctx.total_bits = 47 * 10;
     
-    // Wait if IR is busy
-    while(furi_hal_infrared_is_busy()) {
-        furi_delay_ms(10);
-    }
-    
     furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &tx_ctx);
     furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
     
-    // Wait for transmission to finish
+    // Wait for completion and clean up hardware resources
     furi_hal_infrared_async_tx_wait_termination();
     furi_hal_infrared_async_tx_stop();
 }
