@@ -151,7 +151,7 @@ A custom Flipper Zero app (`cy9_greet`) is included to interact with the badge's
    ```
 3. **Manual Install**:
    If `ufbt launch` fails to find your device, you can manually copy the compiled `.fap` file:
-   - File location: `flipper-app/.build/f7-firmware-D/cy9_greet.fap`
+   - File location: `flipper-app/dist/cy9_greet.fap`
    - Destination: Flipper SD Card `/apps/Infrared/cy9_greet.fap`
 
 ### Using the App
