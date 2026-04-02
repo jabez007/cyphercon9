@@ -58,10 +58,12 @@ static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* du
 }
 
 void cy9_broadcast_greeting() {
-    // If IR is somehow busy, stop it first to satisfy furi_check
+    // If IR is busy, don't try to start another one
     if(furi_hal_infrared_is_busy()) {
-        furi_hal_infrared_async_tx_stop();
+        return;
     }
+
+    furi_hal_power_insomnia_enter();
 
     uint16_t body_len = 32;
     uint8_t event_id = 4; // Broadcast
@@ -110,7 +112,8 @@ void cy9_broadcast_greeting() {
     
     // Wait for completion and clean up hardware resources
     furi_hal_infrared_async_tx_wait_termination();
-    furi_hal_infrared_async_tx_stop();
+    
+    furi_hal_power_insomnia_exit();
 }
 
 static void cy9_greet_draw_callback(Canvas* canvas, void* context) {
@@ -128,6 +131,10 @@ static void cy9_greet_input_callback(InputEvent* input_event, void* context) {
 
 int32_t cy9_greet_app(void* p) {
     UNUSED(p);
+    
+    // CRITICAL: Initialize IR output pin to internal LED
+    furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
+    
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, cy9_greet_draw_callback, NULL);
