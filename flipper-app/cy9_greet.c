@@ -17,69 +17,31 @@
 #define BAUD_RATE 3000
 #define BIT_TIME_US (1000000 / BAUD_RATE)
 #define CARRIER_FREQ 38000
+#define MAX_DURATIONS 471
 
 typedef struct {
-    uint8_t packet[47];
-    uint32_t bit_index;
-    uint32_t total_bits;
-} Cy9TxContext;
+    uint32_t durations[MAX_DURATIONS];
+    uint32_t count;
+    uint32_t index;
+} Cy9Burst;
 
-static Cy9TxContext tx_ctx;
-
-typedef enum {
-    Cy9WorkerEventStop,
-    Cy9WorkerEventTx,
-} Cy9WorkerEvent;
+static Cy9Burst global_burst;
 
 static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* duration, bool* level) {
-    Cy9TxContext* ctx = context;
-    if(ctx->bit_index >= ctx->total_bits) return FuriHalInfraredTxGetDataStateLastDone;
+    Cy9Burst* b = (Cy9Burst*)context;
+    if(b->index >= b->count) return FuriHalInfraredTxGetDataStateLastDone;
     
-    uint32_t byte_index = ctx->bit_index / 10;
-    uint32_t bit_in_byte = ctx->bit_index % 10;
-    uint8_t byte = ctx->packet[byte_index];
+    *duration = b->durations[b->index];
+    *level = (b->index % 2 == 0); // Our timing starts with level=true (Pulse)
+    b->index++;
     
-    bool bit_val;
-    if(bit_in_byte == 0) bit_val = false; // Start
-    else if(bit_in_byte == 9) bit_val = true; // Stop
-    else bit_val = (byte & (1 << (bit_in_byte - 1))) != 0; // Data
-    
-    *duration = BIT_TIME_US;
-    *level = !bit_val; 
-    ctx->bit_index++;
-    
-    return (ctx->bit_index >= ctx->total_bits) ? FuriHalInfraredTxGetDataStateDone : FuriHalInfraredTxGetDataStateOk;
+    return (b->index >= b->count) ? FuriHalInfraredTxGetDataStateDone : FuriHalInfraredTxGetDataStateOk;
 }
 
-static int32_t cy9_worker_thread(void* context) {
-    FuriMessageQueue* worker_queue = context;
-    Cy9WorkerEvent event;
-    NotificationApp* notifications = furi_record_open(RECORD_NOTIFICATION);
-
-    while(furi_message_queue_get(worker_queue, &event, FuriWaitForever) == FuriStatusOk) {
-        if(event == Cy9WorkerEventStop) break;
-        if(event == Cy9WorkerEventTx) {
-            if(furi_hal_infrared_is_busy()) furi_hal_infrared_async_tx_stop();
-            
-            notification_message(notifications, &sequence_blink_blue_100);
-            furi_hal_power_insomnia_enter();
-            
-            furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &tx_ctx);
-            furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
-            furi_hal_infrared_async_tx_wait_termination();
-            furi_hal_infrared_async_tx_stop();
-            
-            furi_hal_power_insomnia_exit();
-        }
-    }
-
-    furi_record_close(RECORD_NOTIFICATION);
-    return 0;
-}
-
-void cy9_broadcast_greeting(FuriMessageQueue* worker_queue) {
+void cy9_broadcast_greeting() {
     if(furi_hal_infrared_is_busy()) return;
 
+    // 1. Prepare packet
     uint16_t body_len = 32;
     uint8_t event_id = 4;
     uint16_t from_id = 0;
@@ -107,12 +69,48 @@ void cy9_broadcast_greeting(FuriMessageQueue* worker_queue) {
     tx_buffer[4] = (tally >> 24) & 0xFF; tx_buffer[5] = (tally >> 16) & 0xFF;
     tx_buffer[6] = (tally >> 8) & 0xFF; tx_buffer[7] = tally & 0xFF;
     
-    for(int i = 0; i < 47; i++) tx_ctx.packet[i] = tx_buffer[46 - i];
-    tx_ctx.bit_index = 0;
-    tx_ctx.total_bits = 47 * 10;
+    // 2. Convert to timing
+    global_burst.count = 0;
+    global_burst.index = 0;
+    bool current_level = false;
+    uint32_t current_duration = 0;
+
+    for(int i = 46; i >= 0; i--) {
+        uint8_t byte = tx_buffer[i];
+        for(int b = 0; b < 10; b++) {
+            bool bit;
+            if(b == 0) bit = false; // Start
+            else if(b == 9) bit = true; // Stop
+            else bit = (byte & (1 << (b - 1))) != 0; // Data
+            
+            bool level = !bit;
+            if(i == 46 && b == 0) {
+                current_level = level;
+                current_duration = BIT_TIME_US;
+            } else if(level == current_level) {
+                current_duration += BIT_TIME_US;
+            } else {
+                if(global_burst.count < MAX_DURATIONS)
+                    global_burst.durations[global_burst.count++] = current_duration;
+                current_level = level;
+                current_duration = BIT_TIME_US;
+            }
+        }
+    }
+    if(global_burst.count < MAX_DURATIONS)
+        global_burst.durations[global_burst.count++] = current_duration;
+
+    // 3. Send
+    NotificationApp* notifications = furi_record_open(RECORD_NOTIFICATION);
+    notification_message(notifications, &sequence_blink_blue_100);
+    furi_hal_power_insomnia_enter();
     
-    Cy9WorkerEvent event = Cy9WorkerEventTx;
-    furi_message_queue_put(worker_queue, &event, 0);
+    furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &global_burst);
+    furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
+    furi_hal_infrared_async_tx_wait_termination();
+
+    furi_hal_power_insomnia_exit();
+    furi_record_close(RECORD_NOTIFICATION);
 }
 
 static void cy9_greet_draw_callback(Canvas* canvas, void* context) {
@@ -133,10 +131,6 @@ int32_t cy9_greet_app(void* p) {
     furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
     
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
-    FuriMessageQueue* worker_queue = furi_message_queue_alloc(1, sizeof(Cy9WorkerEvent));
-    FuriThread* thread = furi_thread_alloc_ex("Cy9Worker", 1024, cy9_worker_thread, worker_queue);
-    furi_thread_start(thread);
-
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, cy9_greet_draw_callback, NULL);
     view_port_input_callback_set(view_port, cy9_greet_input_callback, event_queue);
@@ -147,18 +141,12 @@ int32_t cy9_greet_app(void* p) {
     InputEvent event;
     while(furi_message_queue_get(event_queue, &event, FuriWaitForever) == FuriStatusOk) {
         if(event.type == InputTypeShort && event.key == InputKeyOk) {
-            cy9_broadcast_greeting(worker_queue);
+            cy9_broadcast_greeting();
         } else if(event.key == InputKeyBack) {
             break;
         }
     }
     
-    Cy9WorkerEvent stop_event = Cy9WorkerEventStop;
-    furi_message_queue_put(worker_queue, &stop_event, FuriWaitForever);
-    furi_thread_join(thread);
-    furi_thread_free(thread);
-    furi_message_queue_free(worker_queue);
-
     gui_remove_view_port(gui, view_port);
     view_port_free(view_port);
     furi_message_queue_free(event_queue);
