@@ -8,18 +8,17 @@
 /*
  * CY9 IR Protocol Specs:
  * - 38kHz Carrier
- * - 3000 Baud (333.33 microseconds per bit)
- * - 8N1 (1 start bit '0', 8 data bits LSB-first, 1 stop bit '1')
- * - Idle state: IR OFF (UART HIGH)
- * - Active state: IR ON (UART LOW)
+ * - 3000 Baud
+ * - 8N1 (Start=0, 8 Data LSB-first, Stop=1)
+ * - UART LOW = IR ON | UART HIGH = IR OFF
  */
 
 #define BAUD_RATE 3000
-#define BIT_TIME_US (1000000 / BAUD_RATE)
+#define BIT_TIME_US_FLOAT (1000000.0f / (float)BAUD_RATE)
 #define CARRIER_FREQ 38000
-#define SYNC_PREAMBLE_COUNT 8
+#define SYNC_PREAMBLE_COUNT 4
 #define TOTAL_PACKET_BYTES 47
-#define MAX_DURATIONS ((TOTAL_PACKET_BYTES + SYNC_PREAMBLE_COUNT) * 10 + 1)
+#define MAX_DURATIONS 1000 // Sufficient for ~500 bits
 
 typedef struct {
     uint32_t durations[MAX_DURATIONS];
@@ -34,59 +33,43 @@ static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* du
     if(b->index >= b->count) return FuriHalInfraredTxGetDataStateLastDone;
     
     *duration = b->durations[b->index];
-    *level = (b->index % 2 == 0); // Pulse, Space, Pulse, Space...
+    *level = (b->index % 2 == 0); // Burst starts with IR ON (Start bit)
     b->index++;
     
     return (b->index >= b->count) ? FuriHalInfraredTxGetDataStateDone : FuriHalInfraredTxGetDataStateOk;
 }
 
-static void cy9_append_bit(bool level, uint32_t* current_duration, bool* current_level) {
+static void cy9_add_duration(uint32_t duration, bool level, uint32_t* current_duration, bool* current_level) {
     if(global_burst.count == 0 && *current_duration == 0) {
         *current_level = level;
-        *current_duration = BIT_TIME_US;
+        *current_duration = duration;
     } else if(level == *current_level) {
-        *current_duration += BIT_TIME_US;
+        *current_duration += duration;
     } else {
         if(global_burst.count < MAX_DURATIONS) {
             global_burst.durations[global_burst.count++] = *current_duration;
         }
         *current_level = level;
-        *current_duration = BIT_TIME_US;
-    }
-}
-
-static void cy9_append_byte(uint8_t byte, uint32_t* current_duration, bool* current_level) {
-    for(int b = 0; b < 10; b++) {
-        bool bit;
-        if(b == 0) bit = false; // Start
-        else if(b == 9) bit = true; // Stop
-        else bit = (byte & (1 << (b - 1))) != 0; // Data (LSB)
-        cy9_append_bit(!bit, current_duration, current_level);
+        *current_duration = duration;
     }
 }
 
 void cy9_broadcast_greeting() {
     if(furi_hal_infrared_is_busy()) return;
 
-    // 1. Prepare Packet (47 bytes total)
+    // 1. Prepare Packet
     uint8_t packet[47] = {0};
     uint16_t body_len = 32;
-    uint8_t event_id = 4; // Broadcast
-    uint16_t from_id = 0; // Ghost
-    uint16_t to_id = 0;   // Broadcast scope
+    uint8_t event_id = 3; // 3 = Broadcast from origin
+    uint16_t from_id = 1; // 1 = Founder ID
+    uint16_t to_id = 0;   // 0 = Broadcast scope
 
-    // [0:4] Syncword (0x16 = 22)
     packet[0] = 22; packet[1] = 22; packet[2] = 22; packet[3] = 22;
-    // [8:10] Body Len (Big Endian)
     packet[8] = (body_len >> 8) & 0xFF; packet[9] = body_len & 0xFF;
-    // [10] Event ID
     packet[10] = event_id;
-    // [11:13] From ID (Big Endian)
     packet[11] = (from_id >> 8) & 0xFF; packet[12] = from_id & 0xFF;
-    // [13:15] To ID (Big Endian)
     packet[13] = (to_id >> 8) & 0xFF; packet[14] = to_id & 0xFF;
     
-    // Body [15:47]
     char alias_buf[16];
     memset(alias_buf, ' ', 16);
     const char* flipper_name = furi_hal_version_get_name_ptr();
@@ -97,29 +80,43 @@ void cy9_broadcast_greeting() {
     memcpy(&packet[15], alias_buf, 16);
     memcpy(&packet[31], "Greetz from Cy9!", 16);
     
-    // Checksum [4:8] (sum of bytes 8 to 46)
     uint32_t tally = 0;
     for(int i = 8; i < 47; i++) tally += packet[i];
-    packet[4] = (tally >> 24) & 0xFF;
-    packet[5] = (tally >> 16) & 0xFF;
-    packet[6] = (tally >> 8) & 0xFF;
-    packet[7] = tally & 0xFF;
+    packet[4] = (tally >> 24) & 0xFF; packet[5] = (tally >> 16) & 0xFF;
+    packet[6] = (tally >> 8) & 0xFF; packet[7] = tally & 0xFF;
     
-    // 2. Build Durations
+    // 2. Build High-Precision Timing
     global_burst.count = 0;
     global_burst.index = 0;
     uint32_t current_duration = 0;
     bool current_level = false;
 
-    // Extra syncwords for preamble
-    for(int i = 0; i < SYNC_PREAMBLE_COUNT; i++) {
-        cy9_append_byte(22, &current_duration, &current_level);
-    }
+    uint32_t total_bits = (SYNC_PREAMBLE_COUNT + TOTAL_PACKET_BYTES) * 10;
+    uint32_t last_time_us = 0;
 
-    // Packet in REVERSED order (as per tx() function in blue-badge.py)
-    // tx() sends byte 46, then 45, ..., then 0.
-    for(int i = 46; i >= 0; i--) {
-        cy9_append_byte(packet[i], &current_duration, &current_level);
+    for(uint32_t bit_idx = 0; bit_idx < total_bits; bit_idx++) {
+        uint32_t byte_pos = bit_idx / 10;
+        uint32_t bit_in_byte = bit_idx % 10;
+        uint8_t byte;
+
+        if(byte_pos < SYNC_PREAMBLE_COUNT) {
+            byte = 22; // Preamble Sync
+        } else {
+            // Reversed wire order: packet[46], packet[45]...
+            byte = packet[46 - (byte_pos - SYNC_PREAMBLE_COUNT)];
+        }
+
+        bool bit;
+        if(bit_in_byte == 0) bit = false; // Start (0)
+        else if(bit_in_byte == 9) bit = true; // Stop (1)
+        else bit = (byte & (1 << (bit_in_byte - 1))) != 0; // Data (LSB)
+
+        bool level = !bit; // bit 0 = IR ON, bit 1 = IR OFF
+        
+        // Cumulative timing to avoid drift
+        uint32_t next_time_us = (uint32_t)((float)(bit_idx + 1) * BIT_TIME_US_FLOAT);
+        cy9_add_duration(next_time_us - last_time_us, level, &current_duration, &current_level);
+        last_time_us = next_time_us;
     }
 
     if(current_duration > 0 && global_burst.count < MAX_DURATIONS) {
