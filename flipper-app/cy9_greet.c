@@ -17,32 +17,46 @@
 #define BIT_TIME_US (1000000 / BAUD_RATE)
 #define CARRIER_FREQ 38000
 
-void cy9_send_bit(bool on) {
-    if(on) {
-        // Direct carrier control is much more stable for bit-banging
-        furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
-    } else {
-        furi_hal_infrared_async_tx_stop();
-    }
-    furi_delay_us(BIT_TIME_US);
-}
+typedef struct {
+    uint8_t packet[47];
+    uint32_t bit_index;
+    uint32_t total_bits;
+} Cy9TxContext;
 
-void cy9_send_byte(uint8_t byte) {
-    // Start bit (0) -> IR ON
-    cy9_send_bit(true);
+static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* duration, bool* level) {
+    Cy9TxContext* tx_ctx = context;
     
-    // 8 Data bits (LSB-first) -> 0=ON, 1=OFF
-    // (In our logic: 0 means IR ON, 1 means IR OFF)
-    for(int i = 0; i < 8; i++) {
-        cy9_send_bit(!(byte & (1 << i)));
+    if(tx_ctx->bit_index >= tx_ctx->total_bits) {
+        return FuriHalInfraredTxGetDataStateLastDone;
     }
     
-    // Stop bit (1) -> IR OFF
-    cy9_send_bit(false);
+    uint32_t byte_index = tx_ctx->bit_index / 10;
+    uint32_t bit_in_byte = tx_ctx->bit_index % 10;
+    uint8_t byte = tx_ctx->packet[byte_index];
+    
+    bool bit_val;
+    if(bit_in_byte == 0) { // Start bit (0)
+        bit_val = false;
+    } else if(bit_in_byte == 9) { // Stop bit (1)
+        bit_val = true;
+    } else { // Data bits (LSB first)
+        bit_val = (byte & (1 << (bit_in_byte - 1))) != 0;
+    }
+    
+    *duration = BIT_TIME_US;
+    *level = !bit_val; // bit 0 = IR ON, bit 1 = IR OFF
+    
+    tx_ctx->bit_index++;
+    
+    if(tx_ctx->bit_index >= tx_ctx->total_bits) {
+        return FuriHalInfraredTxGetDataStateDone;
+    }
+    
+    return FuriHalInfraredTxGetDataStateOk;
 }
 
 void cy9_broadcast_greeting() {
-    uint8_t tx_buffer[48] = {0};
+    Cy9TxContext tx_ctx;
     uint16_t body_len = 32;
     uint8_t event_id = 4; // Broadcast
     uint16_t from_id = 0; // Ghost
@@ -59,6 +73,7 @@ void cy9_broadcast_greeting() {
 
     const char* msg = "Ukttzm ykgd En9!";   // 16 bytes
 
+    uint8_t tx_buffer[47] = {0};
     // Build packet as the badge does (Big Endian fields)
     tx_buffer[0] = 22; tx_buffer[1] = 22; tx_buffer[2] = 22; tx_buffer[3] = 22;
     tx_buffer[8] = (body_len >> 8) & 0xFF; tx_buffer[9] = body_len & 0xFF;
@@ -76,13 +91,24 @@ void cy9_broadcast_greeting() {
     tx_buffer[6] = (tally >> 8) & 0xFF;
     tx_buffer[7] = tally & 0xFF;
     
-    // Send REVERSED on the wire
-    // CRITICAL: OTG power is NOT needed for the internal IR LED and can cause crashes.
-    for(int i = 46; i >= 0; i--) {
-        cy9_send_byte(tx_buffer[i]);
+    // Reverse the packet for transmission
+    for(int i = 0; i < 47; i++) {
+        tx_ctx.packet[i] = tx_buffer[46 - i];
     }
     
-    // Ensure IR is OFF when done
+    tx_ctx.bit_index = 0;
+    tx_ctx.total_bits = 47 * 10;
+    
+    // Wait if IR is busy
+    while(furi_hal_infrared_is_busy()) {
+        furi_delay_ms(10);
+    }
+    
+    furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &tx_ctx);
+    furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
+    
+    // Wait for transmission to finish
+    furi_hal_infrared_async_tx_wait_termination();
     furi_hal_infrared_async_tx_stop();
 }
 
