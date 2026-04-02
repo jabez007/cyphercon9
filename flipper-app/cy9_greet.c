@@ -1,5 +1,6 @@
 #include <furi.h>
 #include <furi_hal.h>
+#include <furi_hal_infrared.h>
 #include <gui/gui.h>
 #include <input/input.h>
 
@@ -15,12 +16,6 @@
 #define BAUD_RATE 3000
 #define BIT_TIME_US (1000000 / BAUD_RATE)
 #define CARRIER_FREQ 38000
-
-static const uint8_t SYNCWORD[4] = {22, 22, 22, 22};
-
-typedef struct {
-    uint8_t packet[47];
-} Cy9App;
 
 void cy9_send_bit(bool on) {
     if(on) {

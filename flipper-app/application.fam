@@ -5,7 +5,7 @@ App(
     entry_point="cy9_greet_app",
     stack_size=2 * 1024,
     fap_category="Infrared",
-    fap_icon="cy9_icon.png", # You can add a 10x10 icon later
+    # fap_icon="cy9_icon.png", # You can add a 10x10 icon later
     fap_description="Broadcasts greeting to CypherCon 9 badges via IR",
     fap_author="jabez007",
     fap_weburl="https://github.com/jabez007/cyphercon9",
