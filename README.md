@@ -128,3 +128,31 @@ When the badge is idle with no unread messages, the LEDs perform a repeating lig
 4. **Repeat**
 
 The mail notification (LED rotate) still takes priority when unread messages exist. The light show is distinct from the mail indicator so you can tell them apart at a glance.
+
+### Auto-Greeting (New)
+
+The badge now has a "passive" interaction mode. When it receives a packet from another badge, it will automatically respond with a broadcast greeting (`Greetz from Cy9!`) if it hasn't greeted that specific badge ID in the last 5 minutes. This feature helps you discover other badges at the conference without manual interaction.
+
+## Flipper Zero Application
+
+A custom Flipper Zero app (`cy9_greet`) is included to interact with the badge's IR protocol. It allows you to broadcast a greeting from your Flipper Zero, which will appear on nearby badges as being from your Flipper's unique name (e.g., `M3m0ry`).
+
+### Compiling and Installing
+
+1. **Install ufbt** (in your Python venv):
+   ```bash
+   pip install ufbt
+   ```
+2. **Build and Launch**:
+   Connect your Flipper Zero via USB and run:
+   ```bash
+   cd flipper-app
+   ufbt launch
+   ```
+3. **Manual Install**:
+   If `ufbt launch` fails to find your device, you can manually copy the compiled `.fap` file:
+   - File location: `flipper-app/.build/f7-firmware-D/cy9_greet.fap`
+   - Destination: Flipper SD Card `/apps/Infrared/cy9_greet.fap`
+
+### Using the App
+Open **Apps > Infrared > Cy9 Greeter** on your Flipper Zero. Point it at a badge and press **OK** to send the greeting.
