@@ -26,71 +26,72 @@ typedef struct {
 
 static Cy9TxContext tx_ctx;
 
+typedef enum {
+    Cy9WorkerEventStop,
+    Cy9WorkerEventTx,
+} Cy9WorkerEvent;
+
 static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* duration, bool* level) {
     Cy9TxContext* ctx = context;
-    
-    if(ctx->bit_index >= ctx->total_bits) {
-        return FuriHalInfraredTxGetDataStateLastDone;
-    }
+    if(ctx->bit_index >= ctx->total_bits) return FuriHalInfraredTxGetDataStateLastDone;
     
     uint32_t byte_index = ctx->bit_index / 10;
     uint32_t bit_in_byte = ctx->bit_index % 10;
     uint8_t byte = ctx->packet[byte_index];
     
     bool bit_val;
-    if(bit_in_byte == 0) { // Start bit (0)
-        bit_val = false;
-    } else if(bit_in_byte == 9) { // Stop bit (1)
-        bit_val = true;
-    } else { // Data bits (LSB first)
-        bit_val = (byte & (1 << (bit_in_byte - 1))) != 0;
-    }
+    if(bit_in_byte == 0) bit_val = false; // Start
+    else if(bit_in_byte == 9) bit_val = true; // Stop
+    else bit_val = (byte & (1 << (bit_in_byte - 1))) != 0; // Data
     
     *duration = BIT_TIME_US;
-    *level = !bit_val; // bit 0 = IR ON, bit 1 = IR OFF
-    
+    *level = !bit_val; 
     ctx->bit_index++;
     
-    if(ctx->bit_index >= ctx->total_bits) {
-        return FuriHalInfraredTxGetDataStateDone;
-    }
-    
-    return FuriHalInfraredTxGetDataStateOk;
+    return (ctx->bit_index >= ctx->total_bits) ? FuriHalInfraredTxGetDataStateDone : FuriHalInfraredTxGetDataStateOk;
 }
 
-void cy9_broadcast_greeting() {
-    FURI_LOG_I("Cy9Greet", "Starting broadcast...");
+static int32_t cy9_worker_thread(void* context) {
+    FuriMessageQueue* worker_queue = context;
+    Cy9WorkerEvent event;
+    NotificationApp* notifications = furi_record_open(RECORD_NOTIFICATION);
 
-    // Ensure we are using the internal LED
-    furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
-
-    // If IR is busy, try to stop it
-    if(furi_hal_infrared_is_busy()) {
-        FURI_LOG_W("Cy9Greet", "IR busy, stopping previous...");
-        furi_hal_infrared_async_tx_stop();
+    while(furi_message_queue_get(worker_queue, &event, FuriWaitForever) == FuriStatusOk) {
+        if(event == Cy9WorkerEventStop) break;
+        if(event == Cy9WorkerEventTx) {
+            if(furi_hal_infrared_is_busy()) furi_hal_infrared_async_tx_stop();
+            
+            notification_message(notifications, &sequence_blink_blue_100);
+            furi_hal_power_insomnia_enter();
+            
+            furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &tx_ctx);
+            furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
+            furi_hal_infrared_async_tx_wait_termination();
+            furi_hal_infrared_async_tx_stop();
+            
+            furi_hal_power_insomnia_exit();
+        }
     }
 
-    // Blink blue LED to show activity
-    NotificationApp* notifications = furi_record_open(RECORD_NOTIFICATION);
-    notification_message(notifications, &sequence_blink_blue_100);
+    furi_record_close(RECORD_NOTIFICATION);
+    return 0;
+}
 
-    furi_hal_power_insomnia_enter();
+void cy9_broadcast_greeting(FuriMessageQueue* worker_queue) {
+    if(furi_hal_infrared_is_busy()) return;
 
     uint16_t body_len = 32;
-    uint8_t event_id = 4; // Broadcast
-    uint16_t from_id = 0; // Ghost
-    uint16_t to_id = 0;   // Broadcast
+    uint8_t event_id = 4;
+    uint16_t from_id = 0;
+    uint16_t to_id = 0;
 
     char alias_buf[16];
     memset(alias_buf, ' ', 16);
     const char* flipper_name = furi_hal_version_get_name_ptr();
     if(flipper_name) {
         size_t name_len = strlen(flipper_name);
-        if(name_len > 16) name_len = 16;
-        memcpy(alias_buf, flipper_name, name_len);
+        memcpy(alias_buf, flipper_name, (name_len > 16) ? 16 : name_len);
     }
-
-    const char* msg = "Greetz from Cy9!";   // 16 bytes
 
     uint8_t tx_buffer[47] = {0};
     tx_buffer[0] = 22; tx_buffer[1] = 22; tx_buffer[2] = 22; tx_buffer[3] = 22;
@@ -99,33 +100,19 @@ void cy9_broadcast_greeting() {
     tx_buffer[11] = (from_id >> 8) & 0xFF; tx_buffer[12] = from_id & 0xFF;
     tx_buffer[13] = (to_id >> 8) & 0xFF; tx_buffer[14] = to_id & 0xFF;
     memcpy(&tx_buffer[15], alias_buf, 16);
-    memcpy(&tx_buffer[31], msg, 16);
+    memcpy(&tx_buffer[31], "Greetz from Cy9!", 16);
     
     uint32_t tally = 0;
     for(int i = 8; i < 47; i++) tally += tx_buffer[i];
-    tx_buffer[4] = (tally >> 24) & 0xFF;
-    tx_buffer[5] = (tally >> 16) & 0xFF;
-    tx_buffer[6] = (tally >> 8) & 0xFF;
-    tx_buffer[7] = tally & 0xFF;
+    tx_buffer[4] = (tally >> 24) & 0xFF; tx_buffer[5] = (tally >> 16) & 0xFF;
+    tx_buffer[6] = (tally >> 8) & 0xFF; tx_buffer[7] = tally & 0xFF;
     
-    for(int i = 0; i < 47; i++) {
-        tx_ctx.packet[i] = tx_buffer[46 - i];
-    }
-    
+    for(int i = 0; i < 47; i++) tx_ctx.packet[i] = tx_buffer[46 - i];
     tx_ctx.bit_index = 0;
     tx_ctx.total_bits = 47 * 10;
     
-    furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &tx_ctx);
-    furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
-    
-    // Wait for completion (blocks the UI thread, which is why the screen might freeze briefly)
-    furi_hal_infrared_async_tx_wait_termination();
-    furi_hal_infrared_async_tx_stop();
-
-    furi_hal_power_insomnia_exit();
-    furi_record_close(RECORD_NOTIFICATION);
-    
-    FURI_LOG_I("Cy9Greet", "Broadcast done!");
+    Cy9WorkerEvent event = Cy9WorkerEventTx;
+    furi_message_queue_put(worker_queue, &event, 0);
 }
 
 static void cy9_greet_draw_callback(Canvas* canvas, void* context) {
@@ -143,8 +130,13 @@ static void cy9_greet_input_callback(InputEvent* input_event, void* context) {
 
 int32_t cy9_greet_app(void* p) {
     UNUSED(p);
+    furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
     
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
+    FuriMessageQueue* worker_queue = furi_message_queue_alloc(1, sizeof(Cy9WorkerEvent));
+    FuriThread* thread = furi_thread_alloc_ex("Cy9Worker", 1024, cy9_worker_thread, worker_queue);
+    furi_thread_start(thread);
+
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, cy9_greet_draw_callback, NULL);
     view_port_input_callback_set(view_port, cy9_greet_input_callback, event_queue);
@@ -155,12 +147,18 @@ int32_t cy9_greet_app(void* p) {
     InputEvent event;
     while(furi_message_queue_get(event_queue, &event, FuriWaitForever) == FuriStatusOk) {
         if(event.type == InputTypeShort && event.key == InputKeyOk) {
-            cy9_broadcast_greeting();
+            cy9_broadcast_greeting(worker_queue);
         } else if(event.key == InputKeyBack) {
             break;
         }
     }
     
+    Cy9WorkerEvent stop_event = Cy9WorkerEventStop;
+    furi_message_queue_put(worker_queue, &stop_event, FuriWaitForever);
+    furi_thread_join(thread);
+    furi_thread_free(thread);
+    furi_message_queue_free(worker_queue);
+
     gui_remove_view_port(gui, view_port);
     view_port_free(view_port);
     furi_message_queue_free(event_queue);
