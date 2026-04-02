@@ -1,1 +1,2 @@
 micropython-rp2-stubs
+mpremote
