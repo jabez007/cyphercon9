@@ -3,6 +3,7 @@
 #include <furi_hal_infrared.h>
 #include <gui/gui.h>
 #include <input/input.h>
+#include <notification/notification_messages.h>
 
 /*
  * CY9 IR Protocol Specs:
@@ -58,10 +59,20 @@ static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* du
 }
 
 void cy9_broadcast_greeting() {
-    // If IR is busy, don't try to start another one
+    FURI_LOG_I("Cy9Greet", "Starting broadcast...");
+
+    // Ensure we are using the internal LED
+    furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
+
+    // If IR is busy, try to stop it
     if(furi_hal_infrared_is_busy()) {
-        return;
+        FURI_LOG_W("Cy9Greet", "IR busy, stopping previous...");
+        furi_hal_infrared_async_tx_stop();
     }
+
+    // Blink blue LED to show activity
+    NotificationApp* notifications = furi_record_open(RECORD_NOTIFICATION);
+    notification_message(notifications, &sequence_blink_blue_100);
 
     furi_hal_power_insomnia_enter();
 
@@ -82,7 +93,6 @@ void cy9_broadcast_greeting() {
     const char* msg = "Greetz from Cy9!";   // 16 bytes
 
     uint8_t tx_buffer[47] = {0};
-    // Build packet as the badge does (Big Endian fields)
     tx_buffer[0] = 22; tx_buffer[1] = 22; tx_buffer[2] = 22; tx_buffer[3] = 22;
     tx_buffer[8] = (body_len >> 8) & 0xFF; tx_buffer[9] = body_len & 0xFF;
     tx_buffer[10] = event_id;
@@ -91,7 +101,6 @@ void cy9_broadcast_greeting() {
     memcpy(&tx_buffer[15], alias_buf, 16);
     memcpy(&tx_buffer[31], msg, 16);
     
-    // Tally checksum (sum of bytes 8 to 46)
     uint32_t tally = 0;
     for(int i = 8; i < 47; i++) tally += tx_buffer[i];
     tx_buffer[4] = (tally >> 24) & 0xFF;
@@ -99,7 +108,6 @@ void cy9_broadcast_greeting() {
     tx_buffer[6] = (tally >> 8) & 0xFF;
     tx_buffer[7] = tally & 0xFF;
     
-    // Reverse the packet for transmission (wire order)
     for(int i = 0; i < 47; i++) {
         tx_ctx.packet[i] = tx_buffer[46 - i];
     }
@@ -110,10 +118,14 @@ void cy9_broadcast_greeting() {
     furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &tx_ctx);
     furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
     
-    // Wait for completion and clean up hardware resources
+    // Wait for completion (blocks the UI thread, which is why the screen might freeze briefly)
     furi_hal_infrared_async_tx_wait_termination();
-    
+    furi_hal_infrared_async_tx_stop();
+
     furi_hal_power_insomnia_exit();
+    furi_record_close(RECORD_NOTIFICATION);
+    
+    FURI_LOG_I("Cy9Greet", "Broadcast done!");
 }
 
 static void cy9_greet_draw_callback(Canvas* canvas, void* context) {
@@ -131,9 +143,6 @@ static void cy9_greet_input_callback(InputEvent* input_event, void* context) {
 
 int32_t cy9_greet_app(void* p) {
     UNUSED(p);
-    
-    // CRITICAL: Initialize IR output pin to internal LED
-    furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
     
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     ViewPort* view_port = view_port_alloc();
