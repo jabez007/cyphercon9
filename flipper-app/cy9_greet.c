@@ -19,6 +19,7 @@
 
 void cy9_send_bit(bool on) {
     if(on) {
+        // Direct carrier control is much more stable for bit-banging
         furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
     } else {
         furi_hal_infrared_async_tx_stop();
@@ -31,6 +32,7 @@ void cy9_send_byte(uint8_t byte) {
     cy9_send_bit(true);
     
     // 8 Data bits (LSB-first) -> 0=ON, 1=OFF
+    // (In our logic: 0 means IR ON, 1 means IR OFF)
     for(int i = 0; i < 8; i++) {
         cy9_send_bit(!(byte & (1 << i)));
     }
@@ -75,12 +77,13 @@ void cy9_broadcast_greeting() {
     tx_buffer[7] = tally & 0xFF;
     
     // Send REVERSED on the wire
-    furi_hal_power_enable_otg(); // Power up the IR LED
+    // CRITICAL: OTG power is NOT needed for the internal IR LED and can cause crashes.
     for(int i = 46; i >= 0; i--) {
         cy9_send_byte(tx_buffer[i]);
     }
+    
+    // Ensure IR is OFF when done
     furi_hal_infrared_async_tx_stop();
-    furi_hal_power_disable_otg();
 }
 
 static void cy9_greet_draw_callback(Canvas* canvas, void* context) {
