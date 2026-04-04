@@ -7,12 +7,14 @@
 #include <gui/modules/text_input.h>
 #include <gui/modules/variable_item_list.h>
 #include <notification/notification_messages.h>
+#include <storage/storage.h>
 
 #define BAUD_RATE 3000
 #define BIT_TIME_US (1000000 / BAUD_RATE)
 #define CARRIER_FREQ 38000
 #define MAX_DURATIONS 1000
 #define MAX_LOGGED_IDS 10
+#define SETTINGS_PATH "/ext/apps/Infrared/cy9_remote.settings"
 
 typedef enum {
     Cy9ViewSubmenu,
@@ -75,6 +77,36 @@ typedef struct {
     volatile bool running;
     Cy9View current_view;
 } Cy9RemoteApp;
+
+void cy9_save_settings(Cy9RemoteApp* app) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, SETTINGS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        storage_file_write(file, app->greet_msg, 17);
+        storage_file_write(file, app->founder_msg, 17);
+        uint8_t cls = (uint8_t)app->selected_class;
+        storage_file_write(file, &cls, 1);
+    }
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+}
+
+void cy9_load_settings(Cy9RemoteApp* app) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, SETTINGS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        storage_file_read(file, app->greet_msg, 17);
+        storage_file_read(file, app->founder_msg, 17);
+        uint8_t cls;
+        if(storage_file_read(file, &cls, 1) == 1) app->selected_class = (Cy9BadgeClass)cls;
+    } else {
+        snprintf(app->greet_msg, 17, "Greetz from Cy9!");
+        snprintf(app->founder_msg, 17, "Obey the system.");
+        app->selected_class = Cy9ClassGeneral;
+    }
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+}
 
 static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* duration, bool* level) {
     Cy9Burst* b = (Cy9Burst*)context;
@@ -252,6 +284,7 @@ static int32_t cy9_rx_thread(void* context) {
 
 static void text_input_done_callback(void* context) {
     Cy9RemoteApp* app = context;
+    cy9_save_settings(app);
     view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewSubmenu);
 }
 
@@ -260,6 +293,7 @@ static void class_change_callback(VariableItem* item) {
     uint8_t index = variable_item_get_current_value_index(item);
     app->selected_class = (Cy9BadgeClass)index;
     variable_item_set_current_value_text(item, class_names[index]);
+    cy9_save_settings(app);
 }
 
 static void submenu_callback(void* context, uint32_t index) {
@@ -306,10 +340,10 @@ int32_t cy9_remote_app(void* p) {
     UNUSED(p);
     Cy9RemoteApp* app = malloc(sizeof(Cy9RemoteApp));
     furi_check(app); memset(app, 0, sizeof(Cy9RemoteApp));
-    snprintf(app->greet_msg, 17, "Greetz from Cy9!");
-    snprintf(app->founder_msg, 17, "Obey the system.");
-    app->selected_class = Cy9ClassGeneral;
+    
     app->tx_burst = malloc(sizeof(Cy9Burst)); furi_check(app->tx_burst);
+    cy9_load_settings(app);
+
     app->gui = furi_record_open(RECORD_GUI);
     app->notifications = furi_record_open(RECORD_NOTIFICATION);
     app->rx_queue = furi_message_queue_alloc(128, sizeof(Cy9RxMessage));
