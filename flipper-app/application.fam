@@ -1,12 +1,11 @@
 App(
-    appid="cy9_greet",
-    name="Cy9 Greeter",
+    appid="cy9_remote",
+    name="Cy9 Remote",
     apptype=FlipperAppType.EXTERNAL,
-    entry_point="cy9_greet_app",
-    stack_size=2 * 1024,
+    entry_point="cy9_remote_app",
+    stack_size=4 * 1024,
     fap_category="Infrared",
-    # fap_icon="cy9_icon.png", # You can add a 10x10 icon later
-    fap_description="Broadcasts greeting to CypherCon 9 badges via IR",
-    fap_author="jabez007",
-    fap_weburl="https://github.com/jabez007/cyphercon9",
+    fap_description="Universal Remote for CypherCon 9 badges",
+    fap_author="Gemini CLI",
+    fap_weburl="https://github.com/tymkrs/cyphercon9",
 )
