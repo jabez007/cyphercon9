@@ -28,7 +28,10 @@ void build_packet(uint8_t* packet, uint16_t from_id, uint16_t to_id, uint8_t eve
     packet[13] = (to_id >> 8) & 0xFF; packet[14] = to_id & 0xFF;
     char alias_buf[16], msg_buf[16];
     memset(alias_buf, ' ', 16); memset(msg_buf, ' ', 16);
-    strncpy(alias_buf, alias, 16); strncpy(msg_buf, msg, 16);
+    size_t name_len = strlen(alias);
+    memcpy(alias_buf, alias, (name_len > 16) ? 16 : name_len);
+    size_t msg_len = strlen(msg);
+    memcpy(msg_buf, msg, (msg_len > 16) ? 16 : msg_len);
     memcpy(&packet[15], alias_buf, 16); memcpy(&packet[31], msg_buf, 16);
     uint32_t tally = 0;
     for(int i = 8; i < 47; i++) tally += packet[i];
