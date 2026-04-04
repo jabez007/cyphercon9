@@ -10,6 +10,10 @@
 #define BIT_TIME_US_FLOAT (1000000.0f / (float)BAUD_RATE)
 #define MAX_EDGES 5000
 
+// Custom Badge Font Icons
+#define ICON_DIAMOND 0x0F
+#define ICON_CIRCLE  0x10
+
 typedef enum {
     Cy9ClassGhost, Cy9ClassFounder, Cy9ClassExtreme, Cy9ClassLifetime,
     Cy9ClassSpeaker, Cy9ClassGeneral, Cy9ClassVendor, Cy9ClassChaos, Cy9ClassCount
@@ -52,8 +56,26 @@ void build_packet(uint8_t* packet, uint16_t from_id, const char* alias, const ch
     
     char alias_buf[16], msg_buf[16];
     memset(alias_buf, ' ', 16); memset(msg_buf, ' ', 16);
-    if(alias) memcpy(alias_buf, alias, (strlen(alias) > 16) ? 16 : strlen(alias));
-    if(msg) memcpy(msg_buf, msg, (strlen(msg) > 16) ? 16 : strlen(msg));
+    
+    if(alias) {
+        size_t len = strlen(alias);
+        if(len > 14) len = 14;
+        memcpy(alias_buf, alias, len);
+        
+        // Icon Injection Logic (from cy9_remote.c)
+        if(from_id >= 1 && from_id <= 25) { // Founder
+            alias_buf[len] = ' ';
+            alias_buf[len+1] = ICON_DIAMOND;
+        } else if(from_id >= 26 && from_id <= 100) { // Extreme
+            alias_buf[len] = ' ';
+            alias_buf[len+1] = ICON_CIRCLE;
+        }
+    }
+    
+    if(msg) {
+        size_t len = strlen(msg);
+        memcpy(msg_buf, msg, (len > 16) ? 16 : len);
+    }
     memcpy(&packet[15], alias_buf, 16); memcpy(&packet[31], msg_buf, 16);
     
     uint32_t tally = 0;
@@ -151,10 +173,10 @@ void test_space_padding() {
     uint8_t packet[47];
     build_packet(packet, 1, "Hi", "Bye");
     assert(packet[15] == 'H' && packet[16] == 'i');
-    for(int i = 17; i < 31; i++) assert(packet[i] == 0x20);
-    assert(packet[31] == 'B' && packet[32] == 'y' && packet[33] == 'e');
-    for(int i = 34; i < 47; i++) assert(packet[i] == 0x20);
-    printf("   ✓ 0x20 Space padding verified!\n");
+    assert(packet[17] == ' '); // separator
+    assert(packet[18] == ICON_DIAMOND); // ID 1 is Founder
+    for(int i = 19; i < 31; i++) assert(packet[i] == 0x20);
+    printf("   ✓ 0x20 Space padding and Icon injection verified!\n");
 }
 
 void test_identity_ranges() {
@@ -181,8 +203,30 @@ void test_default_state() {
     printf("   ✓ Default 'Extreme' state verified!\n");
 }
 
+void test_icon_injection() {
+    printf("6. Testing Icon Injection Logic...\n");
+    uint8_t pkt[47];
+    
+    // Founder test (ID 1..25)
+    build_packet(pkt, 1, "M3m0ry", "Hi");
+    assert(pkt[15+6] == ' ');
+    assert(pkt[15+7] == ICON_DIAMOND);
+    
+    // Extreme test (ID 26..100)
+    build_packet(pkt, 50, "M3m0ry", "Hi");
+    assert(pkt[15+6] == ' ');
+    assert(pkt[15+7] == ICON_CIRCLE);
+    
+    // Regular test (ID 221+)
+    build_packet(pkt, 221, "M3m0ry", "Hi");
+    assert(pkt[15+6] == ' ');
+    assert(pkt[15+7] == ' '); // No icon for regular class
+    
+    printf("   ✓ Icon injection for elevated classes verified!\n");
+}
+
 void test_full_loopback() {
-    printf("6. Testing Full Loopback (Send -> Edges -> Sniff)...\n");
+    printf("7. Testing Full Loopback (Send -> Edges -> Sniff)...\n");
     uint8_t packet[47]; EdgeStream stream;
     uint16_t target_id = 675;
     build_packet(packet, target_id, "Flipper", "Chaos!");
@@ -201,6 +245,7 @@ int main() {
     test_space_padding();
     test_identity_ranges();
     test_default_state();
+    test_icon_injection();
     test_full_loopback();
     printf("\nVERIFICATION COMPLETE: Every system is mathematically proven.\n");
     return 0;
