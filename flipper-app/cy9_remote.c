@@ -6,6 +6,13 @@
 #include <gui/modules/submenu.h>
 #include <notification/notification_messages.h>
 
+/*
+ * CY9 IR Protocol Specs:
+ * - 38kHz Carrier
+ * - 3000 Baud
+ * - 8N1 (Start=0, 8 Data LSB-first, Stop=1)
+ */
+
 #define BAUD_RATE 3000
 #define BIT_TIME_US (1000000 / BAUD_RATE)
 #define CARRIER_FREQ 38000
@@ -45,12 +52,11 @@ typedef struct {
     FuriThread* rx_thread;
     FuriMessageQueue* rx_queue;
     
+    Cy9Burst* tx_burst;
     volatile bool sniffing;
     volatile bool rx_active;
     volatile bool running;
 } Cy9RemoteApp;
-
-static Cy9Burst global_burst;
 
 static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* duration, bool* level) {
     Cy9Burst* b = (Cy9Burst*)context;
@@ -61,14 +67,14 @@ static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* du
     return (b->index >= b->count) ? FuriHalInfraredTxGetDataStateDone : FuriHalInfraredTxGetDataStateOk;
 }
 
-static void cy9_add_duration(uint32_t duration, bool level, uint32_t* current_duration, bool* current_level) {
-    if(global_burst.count == 0 && *current_duration == 0) {
+static void cy9_add_duration(Cy9Burst* burst, uint32_t duration, bool level, uint32_t* current_duration, bool* current_level) {
+    if(burst->count == 0 && *current_duration == 0) {
         *current_level = level;
         *current_duration = duration;
     } else if(level == *current_level) {
         *current_duration += duration;
     } else {
-        if(global_burst.count < MAX_DURATIONS) global_burst.durations[global_burst.count++] = *current_duration;
+        if(burst->count < MAX_DURATIONS) burst->durations[burst->count++] = *current_duration;
         *current_level = level;
         *current_duration = duration;
     }
@@ -101,19 +107,20 @@ void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_
     packet[4] = (tally >> 24) & 0xFF; packet[5] = (tally >> 16) & 0xFF;
     packet[6] = (tally >> 8) & 0xFF; packet[7] = tally & 0xFF;
     
-    global_burst.count = 0; global_burst.index = 0;
+    app->tx_burst->count = 0; app->tx_burst->index = 0;
     uint32_t current_duration = 0; bool current_level = false; uint32_t last_time_us = 0;
     for(uint32_t bit_idx = 0; bit_idx < 47 * 10; bit_idx++) {
         uint8_t byte = packet[46 - (bit_idx / 10)];
         uint32_t b = bit_idx % 10;
         bool bit = (b == 0) ? false : (b == 9) ? true : (byte & (1 << (b - 1))) != 0;
         uint32_t next_time_us = (uint32_t)((float)(bit_idx + 1) * (1000000.0f / 3000.0f));
-        cy9_add_duration(next_time_us - last_time_us, !bit, &current_duration, &current_level);
+        cy9_add_duration(app->tx_burst, next_time_us - last_time_us, !bit, &current_duration, &current_level);
         last_time_us = next_time_us;
     }
-    if(current_duration > 0) global_burst.durations[global_burst.count++] = current_duration;
+    if(current_duration > 0) app->tx_burst->durations[app->tx_burst->count++] = current_duration;
+    
     furi_hal_power_insomnia_enter();
-    furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &global_burst);
+    furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, app->tx_burst);
     furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
     furi_hal_infrared_async_tx_wait_termination();
     furi_hal_power_insomnia_exit();
@@ -122,11 +129,9 @@ void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_
 static void sniffer_draw_callback(Canvas* canvas, void* model) {
     Cy9SnifferModel* m = model;
     if(!m) return;
-
     canvas_set_color(canvas, ColorBlack);
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 0, 10, "IR Sniffer Log");
-    
     canvas_set_font(canvas, FontSecondary);
     if(m->logged_count == 0) {
         canvas_draw_str(canvas, 0, 30, "Scanning for badges...");
@@ -272,13 +277,16 @@ int32_t cy9_remote_app(void* p) {
     furi_check(app);
     memset(app, 0, sizeof(Cy9RemoteApp));
     
+    app->tx_burst = malloc(sizeof(Cy9Burst));
+    furi_check(app->tx_burst);
+    memset(app->tx_burst, 0, sizeof(Cy9Burst));
+
     app->gui = furi_record_open(RECORD_GUI);
     app->notifications = furi_record_open(RECORD_NOTIFICATION);
     app->rx_queue = furi_message_queue_alloc(128, sizeof(Cy9RxMessage));
     furi_check(app->gui && app->notifications && app->rx_queue);
     
     app->running = true;
-    
     app->view_dispatcher = view_dispatcher_alloc();
     furi_check(app->view_dispatcher);
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
@@ -330,6 +338,7 @@ int32_t cy9_remote_app(void* p) {
     view_dispatcher_free(app->view_dispatcher);
     furi_record_close(RECORD_GUI);
     furi_record_close(RECORD_NOTIFICATION);
+    free(app->tx_burst);
     free(app);
     return 0;
 }
