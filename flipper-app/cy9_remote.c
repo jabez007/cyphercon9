@@ -16,6 +16,11 @@
 #define MAX_LOGGED_IDS 10
 #define SETTINGS_PATH "/ext/apps/Infrared/cy9_remote.settings"
 
+// Custom Badge Font Icons
+#define ICON_DIAMOND 0x0F
+#define ICON_CIRCLE  0x10
+#define ICON_CHECK   0x11
+
 typedef enum {
     Cy9ViewSubmenu,
     Cy9ViewSniffer,
@@ -153,15 +158,37 @@ void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_
     packet[10] = event_id;
     packet[11] = (from_id >> 8) & 0xFF; packet[12] = from_id & 0xFF;
     packet[13] = (to_id >> 8) & 0xFF; packet[14] = to_id & 0xFF;
+    
     char alias_buf[16], msg_buf[16];
     memset(alias_buf, ' ', 16); memset(msg_buf, ' ', 16);
-    if(alias) memcpy(alias_buf, alias, (strlen(alias) > 16) ? 16 : strlen(alias));
-    if(msg) memcpy(msg_buf, msg, (strlen(msg) > 16) ? 16 : strlen(msg));
+    
+    // Auto-Icon Injection based on sender ID range
+    if(alias) {
+        size_t len = strlen(alias);
+        if(len > 14) len = 14; // Leave room for space + icon
+        memcpy(alias_buf, alias, len);
+        
+        // Add special icon for elevated statuses
+        if(from_id >= 1 && from_id <= 25) { // Founder
+            alias_buf[len] = ' ';
+            alias_buf[len+1] = ICON_DIAMOND;
+        } else if(from_id >= 26 && from_id <= 100) { // Extreme
+            alias_buf[len] = ' ';
+            alias_buf[len+1] = ICON_CIRCLE;
+        }
+    }
+    
+    if(msg) {
+        size_t len = strlen(msg);
+        memcpy(msg_buf, msg, (len > 16) ? 16 : len);
+    }
     memcpy(&packet[15], alias_buf, 16); memcpy(&packet[31], msg_buf, 16);
+    
     uint32_t tally = 0;
     for(int i = 8; i < 47; i++) tally += packet[i];
     packet[4] = (tally >> 24) & 0xFF; packet[5] = (tally >> 16) & 0xFF;
     packet[6] = (tally >> 8) & 0xFF; packet[7] = tally & 0xFF;
+    
     app->tx_burst->count = 0; app->tx_burst->index = 0;
     uint32_t current_duration = 0; bool current_level = false; uint32_t last_time_us = 0;
     for(uint32_t bit_idx = 0; bit_idx < 47 * 10; bit_idx++) {
@@ -221,7 +248,7 @@ static bool sniffer_input_callback(InputEvent* event, void* context) {
                 if(model->selected_index >= 0) { target = model->logged_ids[model->selected_index]; has_target = true; }
             }, false);
             if(has_target) {
-                cy9_send_packet(app, cy9_get_random_id(app->selected_class), target, 3, "Flipper", app->greet_msg);
+                cy9_send_packet(app, cy9_get_random_id(app->selected_class), target, 3, furi_hal_version_get_name_ptr(), app->greet_msg);
                 notification_message(app->notifications, &sequence_blink_blue_100);
             }
             return true;
@@ -299,6 +326,7 @@ static void class_change_callback(VariableItem* item) {
 static void submenu_callback(void* context, uint32_t index) {
     Cy9RemoteApp* app = context;
     if(!app) return;
+    const char* name = furi_hal_version_get_name_ptr();
     if(index == 4) {
         app->sniffing = true; app->rx_active = true;
         furi_hal_infrared_async_rx_set_capture_isr_callback(cy9_rx_capture_callback, app);
@@ -315,9 +343,8 @@ static void submenu_callback(void* context, uint32_t index) {
         app->current_view = Cy9ViewVariableList;
         view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewVariableList);
     } else {
-        const char* name = furi_hal_version_get_name_ptr();
-        if(index == 0) cy9_send_packet(app, cy9_get_random_id(app->selected_class), 0, 3, name ? name : "Flipper", app->greet_msg);
-        else if(index == 1) cy9_send_packet(app, cy9_get_random_id(Cy9ClassFounder), 0, 3, "FOUNDER", app->founder_msg);
+        if(index == 0) cy9_send_packet(app, cy9_get_random_id(app->selected_class), 0, 3, name, app->greet_msg);
+        else if(index == 1) cy9_send_packet(app, cy9_get_random_id(Cy9ClassFounder), 0, 3, name, app->founder_msg);
         else if(index == 2) for(int i=0; i<5; i++) cy9_send_packet(app, cy9_get_random_id(app->selected_class), 0, 4, "NUKE", "Flood...");
         else if(index == 3) for(int i=1; i<6; i++) cy9_send_packet(app, cy9_get_random_id(Cy9ClassChaos), 0, 4, "CHAOS", "Flood...");
         notification_message(app->notifications, &sequence_blink_blue_100);
@@ -340,10 +367,8 @@ int32_t cy9_remote_app(void* p) {
     UNUSED(p);
     Cy9RemoteApp* app = malloc(sizeof(Cy9RemoteApp));
     furi_check(app); memset(app, 0, sizeof(Cy9RemoteApp));
-    
     app->tx_burst = malloc(sizeof(Cy9Burst)); furi_check(app->tx_burst);
     cy9_load_settings(app);
-
     app->gui = furi_record_open(RECORD_GUI);
     app->notifications = furi_record_open(RECORD_NOTIFICATION);
     app->rx_queue = furi_message_queue_alloc(128, sizeof(Cy9RxMessage));
