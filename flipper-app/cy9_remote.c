@@ -24,6 +24,10 @@ typedef enum {
     Cy9ViewSniffer,
 } Cy9View;
 
+typedef enum {
+    Cy9CustomEventUpdate,
+} Cy9CustomEvent;
+
 typedef struct {
     uint32_t durations[MAX_DURATIONS];
     uint32_t count;
@@ -116,9 +120,11 @@ void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_
         last_time_us = next_time_us;
     }
     if(current_duration > 0) global_burst.durations[global_burst.count++] = current_duration;
+    furi_hal_power_insomnia_enter();
     furi_hal_infrared_async_tx_set_data_isr_callback(cy9_tx_callback, &global_burst);
     furi_hal_infrared_async_tx_start(CARRIER_FREQ, 0.5f);
     furi_hal_infrared_async_tx_wait_termination();
+    furi_hal_power_insomnia_exit();
 }
 
 static void sniffer_draw_callback(Canvas* canvas, void* context) {
@@ -152,12 +158,10 @@ static bool sniffer_input_callback(InputEvent* event, void* context) {
     if(event->type == InputTypeShort) {
         if(event->key == InputKeyDown) {
             if(app->logged_count > 0) app->selected_index = (app->selected_index + 1) % app->logged_count;
-            view_commit_model(app->sniffer_view, true);
-            return true;
+            return false; // Return false to trigger dispatcher redraw
         } else if(event->key == InputKeyUp) {
             if(app->logged_count > 0) app->selected_index = (app->selected_index - 1 + app->logged_count) % app->logged_count;
-            view_commit_model(app->sniffer_view, true);
-            return true;
+            return false;
         } else if(event->key == InputKeyOk && app->selected_index >= 0) {
             uint16_t target = app->logged_ids[app->selected_index];
             cy9_send_packet(app, 1, target, 3, "Flipper", "I see you! :)");
@@ -175,11 +179,12 @@ static void cy9_rx_capture_callback(void* context, bool level, uint32_t duration
     furi_message_queue_put(app->rx_queue, &msg, 0);
 }
 
+typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
+
 static int32_t cy9_rx_thread(void* context) {
     Cy9RemoteApp* app = context;
     if(!app) return -1;
     Cy9RxMessage msg;
-    typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
     DecodeState state = DecodeStateIdle;
     uint32_t bit_acc = 0, bits = 0;
     uint8_t pkt_circ[47] = {0};
@@ -206,7 +211,8 @@ static int32_t cy9_rx_thread(void* context) {
                                 app->logged_ids[app->logged_count++] = id;
                                 if(app->selected_index < 0) app->selected_index = 0;
                                 if(app->notifications) notification_message(app->notifications, &sequence_blink_green_100);
-                                view_commit_model(app->sniffer_view, true);
+                                // Decoupled UI trigger
+                                view_dispatcher_send_custom_event(app->view_dispatcher, Cy9CustomEventUpdate);
                             }
                             app->total_packets++;
                         }
@@ -245,9 +251,18 @@ static bool cy9_navigation_callback(void* context) {
         app->sniffing = false;
         furi_hal_infrared_async_rx_stop();
         view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewSubmenu);
-        return true; // We handled the event
+        return true;
     }
-    return false; // Exit app
+    return false;
+}
+
+static bool cy9_custom_event_callback(void* context, uint32_t event) {
+    Cy9RemoteApp* app = context;
+    if(event == Cy9CustomEventUpdate) {
+        if(app->sniffer_view) view_commit_model(app->sniffer_view, true);
+        return true;
+    }
+    return false;
 }
 
 int32_t cy9_remote_app(void* p) {
@@ -266,12 +281,14 @@ int32_t cy9_remote_app(void* p) {
     
     app->view_dispatcher = view_dispatcher_alloc();
     furi_check(app->view_dispatcher);
-    view_dispatcher_enable_queue(app->view_dispatcher);
+    // Modern Flipper apps don't need enable_queue, it's automatic or managed via thread
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_navigation_event_callback(app->view_dispatcher, cy9_navigation_callback);
+    view_dispatcher_set_custom_event_callback(app->view_dispatcher, cy9_custom_event_callback);
 
     app->submenu = submenu_alloc();
+    furi_check(app->submenu);
     submenu_set_header(app->submenu, "Cy9 Remote");
     submenu_add_item(app->submenu, "Quick Greet", 0, submenu_callback, app);
     submenu_add_item(app->submenu, "Spoof Founder", 1, submenu_callback, app);
@@ -280,6 +297,7 @@ int32_t cy9_remote_app(void* p) {
     submenu_add_item(app->submenu, "Sniffer Log", 4, submenu_callback, app);
     
     app->sniffer_view = view_alloc();
+    furi_check(app->sniffer_view);
     view_set_draw_callback(app->sniffer_view, sniffer_draw_callback);
     view_set_input_callback(app->sniffer_view, sniffer_input_callback);
     view_set_context(app->sniffer_view, app);
@@ -294,13 +312,9 @@ int32_t cy9_remote_app(void* p) {
     furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
     view_dispatcher_run(app->view_dispatcher);
     
-    // Defensive exit logic
     app->running = false;
-    if(app->sniffing) {
-        app->sniffing = false;
-        furi_hal_infrared_async_rx_stop();
-    }
-    
+    app->sniffing = false;
+    furi_hal_infrared_async_rx_stop();
     furi_thread_join(app->rx_thread);
     furi_thread_free(app->rx_thread);
     furi_message_queue_free(app->rx_queue);
