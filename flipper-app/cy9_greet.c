@@ -18,7 +18,7 @@
 #define BIT_TIME_US (1000000 / BAUD_RATE)
 #define CARRIER_FREQ 38000
 #define MAX_DURATIONS 1000
-#define RX_BUF_SIZE 64
+#define MAX_LOGGED_IDS 10
 
 typedef struct {
     uint32_t durations[MAX_DURATIONS];
@@ -35,7 +35,11 @@ typedef struct {
     
     FuriThread* rx_thread;
     FuriMessageQueue* rx_queue;
-    uint16_t last_seen_id;
+    
+    uint16_t logged_ids[MAX_LOGGED_IDS];
+    uint8_t logged_count;
+    int8_t selected_index;
+    
     bool sniffing;
     uint32_t total_packets;
 } Cy9RemoteApp;
@@ -100,18 +104,43 @@ void cy9_send_packet(uint16_t from_id, uint16_t to_id, uint8_t event_id, const c
 static void sniffer_draw_callback(Canvas* canvas, void* context) {
     Cy9RemoteApp* app = context;
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 0, 10, "IR Sniffer (3000 Baud)");
+    canvas_draw_str(canvas, 0, 10, "IR Sniffer Log");
+    
     canvas_set_font(canvas, FontSecondary);
-    if(app->last_seen_id == 0) {
+    if(app->logged_count == 0) {
         canvas_draw_str(canvas, 0, 30, "Scanning for badges...");
     } else {
-        char buf[32]; 
-        snprintf(buf, 32, "Last ID Seen: %03d", app->last_seen_id);
-        canvas_draw_str(canvas, 0, 30, buf);
-        snprintf(buf, 32, "Total Packets: %ld", app->total_packets);
-        canvas_draw_str(canvas, 0, 42, buf);
+        for(uint8_t i = 0; i < app->logged_count; i++) {
+            char buf[16];
+            snprintf(buf, 16, "Badge ID: %03d", app->logged_ids[i]);
+            if(i == app->selected_index) {
+                canvas_draw_str(canvas, 0, 22 + (i * 10), ">");
+                canvas_draw_str(canvas, 10, 22 + (i * 10), buf);
+            } else {
+                canvas_draw_str(canvas, 10, 22 + (i * 10), buf);
+            }
+        }
+        canvas_draw_str(canvas, 85, 60, "OK: Greet");
     }
-    canvas_draw_str(canvas, 0, 60, "Point Flipper at Badge");
+}
+
+static bool sniffer_input_callback(InputEvent* event, void* context) {
+    Cy9RemoteApp* app = context;
+    if(event->type == InputTypeShort) {
+        if(event->key == InputKeyDown) {
+            app->selected_index = (app->selected_index + 1) % app->logged_count;
+            return true;
+        } else if(event->key == InputKeyUp) {
+            app->selected_index = (app->selected_index - 1 + app->logged_count) % app->logged_count;
+            return true;
+        } else if(event->key == InputKeyOk && app->selected_index >= 0) {
+            uint16_t target = app->logged_ids[app->selected_index];
+            cy9_send_packet(1, target, 3, "Flipper", "I see you! :)");
+            notification_message(app->notifications, &sequence_blink_blue_100);
+            return true;
+        }
+    }
+    return false;
 }
 
 static void cy9_rx_capture_callback(void* context, bool level, uint32_t duration) {
@@ -120,52 +149,40 @@ static void cy9_rx_capture_callback(void* context, bool level, uint32_t duration
     furi_message_queue_put(app->rx_queue, &msg, 0);
 }
 
-typedef enum {
-    DecodeStateIdle,
-    DecodeStateData,
-} DecodeState;
+typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
 
 static int32_t cy9_rx_thread(void* context) {
     Cy9RemoteApp* app = context;
     struct { bool level; uint32_t duration; } msg;
-    
     DecodeState state = DecodeStateIdle;
-    uint32_t bit_accumulator = 0;
-    uint32_t bits_collected = 0;
-    uint8_t packet_buf[47];
-    uint8_t packet_idx = 0;
+    uint32_t bit_acc = 0, bits = 0;
+    uint8_t pkt[47], pidx = 0;
 
     while(app->sniffing) {
         if(furi_message_queue_get(app->rx_queue, &msg, 100) == FuriStatusOk) {
-            // Flipper IR receiver: level true = pulse (UART LOW), level false = space (UART HIGH)
-            bool uart_bit = !msg.level;
-            uint32_t num_bits = (msg.duration + (BIT_TIME_US / 2)) / BIT_TIME_US;
-            if(num_bits == 0) num_bits = 1;
-
-            for(uint32_t i = 0; i < num_bits; i++) {
+            bool bit = !msg.level;
+            uint32_t n = (msg.duration + (BIT_TIME_US / 2)) / BIT_TIME_US;
+            if(n == 0) n = 1;
+            for(uint32_t i = 0; i < n; i++) {
                 if(state == DecodeStateIdle) {
-                    if(!uart_bit) { // Start bit (0) detected
-                        state = DecodeStateData;
-                        bit_accumulator = 0;
-                        bits_collected = 0;
-                    }
+                    if(!bit) { state = DecodeStateData; bit_acc = 0; bits = 0; }
                 } else {
-                    if(bits_collected < 8) {
-                        if(uart_bit) bit_accumulator |= (1 << bits_collected);
-                        bits_collected++;
-                    } else { // 9th bit is Stop Bit (1)
-                        uint8_t byte = (uint8_t)bit_accumulator;
-                        
-                        // Badge protocol: Look for Syncwords (0x16)
-                        if(byte == 22) {
-                            packet_idx = 0;
-                            packet_buf[packet_idx++] = byte;
-                        } else if(packet_idx > 0 && packet_idx < 47) {
-                            packet_buf[packet_idx++] = byte;
-                            if(packet_idx == 13) { // Bytes 11-12 are From ID (Big Endian)
-                                app->last_seen_id = (packet_buf[11] << 8) | packet_buf[12];
+                    if(bits < 8) { if(bit) bit_acc |= (1 << bits); bits++; }
+                    else {
+                        uint8_t byte = (uint8_t)bit_acc;
+                        if(byte == 22) { pidx = 0; pkt[pidx++] = byte; }
+                        else if(pidx > 0 && pidx < 47) {
+                            pkt[pidx++] = byte;
+                            if(pidx == 13) {
+                                uint16_t id = (pkt[11] << 8) | pkt[12];
+                                bool known = false;
+                                for(int k=0; k<app->logged_count; k++) if(app->logged_ids[k] == id) known = true;
+                                if(!known && app->logged_count < MAX_LOGGED_IDS) {
+                                    app->logged_ids[app->logged_count++] = id;
+                                    if(app->selected_index < 0) app->selected_index = 0;
+                                    notification_message(app->notifications, &sequence_blink_green_100);
+                                }
                                 app->total_packets++;
-                                notification_message(app->notifications, &sequence_blink_green_100);
                             }
                         }
                         state = DecodeStateIdle;
@@ -209,8 +226,8 @@ int32_t cy9_remote_app(void* p) {
     Cy9RemoteApp* app = malloc(sizeof(Cy9RemoteApp));
     app->gui = furi_record_open(RECORD_GUI);
     app->notifications = furi_record_open(RECORD_NOTIFICATION);
-    app->last_seen_id = 0;
-    app->total_packets = 0;
+    app->logged_count = 0;
+    app->selected_index = -1;
     app->sniffing = false;
     app->rx_queue = furi_message_queue_alloc(128, 8);
     
@@ -225,10 +242,11 @@ int32_t cy9_remote_app(void* p) {
     submenu_add_item(app->submenu, "Spoof Founder", 1, submenu_callback, app);
     submenu_add_item(app->submenu, "Inbox Nuke", 2, submenu_callback, app);
     submenu_add_item(app->submenu, "Chaos Mode", 3, submenu_callback, app);
-    submenu_add_item(app->submenu, "Sniffer", 4, submenu_callback, app);
+    submenu_add_item(app->submenu, "Sniffer Log", 4, submenu_callback, app);
     
     app->sniffer_view = view_alloc();
     view_set_draw_callback(app->sniffer_view, sniffer_draw_callback);
+    view_set_input_callback(app->sniffer_view, sniffer_input_callback);
     view_set_context(app->sniffer_view, app);
     
     view_dispatcher_add_view(app->view_dispatcher, 0, submenu_get_view(app->submenu));
@@ -245,7 +263,6 @@ int32_t cy9_remote_app(void* p) {
     furi_thread_join(app->rx_thread);
     furi_thread_free(app->rx_thread);
     furi_message_queue_free(app->rx_queue);
-    
     view_dispatcher_remove_view(app->view_dispatcher, 0);
     view_dispatcher_remove_view(app->view_dispatcher, 1);
     submenu_free(app->submenu);
