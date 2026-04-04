@@ -105,7 +105,6 @@ static void sniffer_draw_callback(Canvas* canvas, void* context) {
     Cy9RemoteApp* app = context;
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 0, 10, "IR Sniffer Log");
-    
     canvas_set_font(canvas, FontSecondary);
     if(app->logged_count == 0) {
         canvas_draw_str(canvas, 0, 30, "Scanning for badges...");
@@ -128,10 +127,10 @@ static bool sniffer_input_callback(InputEvent* event, void* context) {
     Cy9RemoteApp* app = context;
     if(event->type == InputTypeShort) {
         if(event->key == InputKeyDown) {
-            app->selected_index = (app->selected_index + 1) % app->logged_count;
+            if(app->logged_count > 0) app->selected_index = (app->selected_index + 1) % app->logged_count;
             return true;
         } else if(event->key == InputKeyUp) {
-            app->selected_index = (app->selected_index - 1 + app->logged_count) % app->logged_count;
+            if(app->logged_count > 0) app->selected_index = (app->selected_index - 1 + app->logged_count) % app->logged_count;
             return true;
         } else if(event->key == InputKeyOk && app->selected_index >= 0) {
             uint16_t target = app->logged_ids[app->selected_index];
@@ -156,36 +155,36 @@ static int32_t cy9_rx_thread(void* context) {
     struct { bool level; uint32_t duration; } msg;
     DecodeState state = DecodeStateIdle;
     uint32_t bit_acc = 0, bits = 0;
-    uint8_t pkt[47], pidx = 0;
+    uint8_t pkt_circ[47];
+    uint8_t p_idx = 0;
 
     while(app->sniffing) {
         if(furi_message_queue_get(app->rx_queue, &msg, 100) == FuriStatusOk) {
             bool bit = !msg.level;
-            uint32_t n = (msg.duration + (BIT_TIME_US / 2)) / BIT_TIME_US;
-            if(n == 0) n = 1;
-            for(uint32_t i = 0; i < n; i++) {
+            int n = (int)(( (float)msg.duration + (BIT_TIME_US / 2.0f) ) / BIT_TIME_US);
+            if(n <= 0) n = 1;
+            
+            for(int i = 0; i < n; i++) {
                 if(state == DecodeStateIdle) {
                     if(!bit) { state = DecodeStateData; bit_acc = 0; bits = 0; }
                 } else {
                     if(bits < 8) { if(bit) bit_acc |= (1 << bits); bits++; }
                     else {
-                        uint8_t byte = (uint8_t)bit_acc;
-                        if(byte == 22) { pidx = 0; pkt[pidx++] = byte; }
-                        else if(pidx > 0 && pidx < 47) {
-                            pkt[pidx++] = byte;
-                            if(pidx == 13) {
-                                uint16_t id = (pkt[11] << 8) | pkt[12];
-                                bool known = false;
-                                for(int k=0; k<app->logged_count; k++) if(app->logged_ids[k] == id) known = true;
-                                if(!known && app->logged_count < MAX_LOGGED_IDS) {
-                                    app->logged_ids[app->logged_count++] = id;
-                                    if(app->selected_index < 0) app->selected_index = 0;
-                                    notification_message(app->notifications, &sequence_blink_green_100);
-                                }
-                                app->total_packets++;
+                        pkt_circ[p_idx] = (uint8_t)bit_acc;
+                        if(pkt_circ[p_idx] == 22) {
+                            uint16_t id = (pkt_circ[(p_idx + 47 - 11) % 47] << 8) | pkt_circ[(p_idx + 47 - 12) % 47];
+                            bool known = false;
+                            for(int k=0; k<app->logged_count; k++) if(app->logged_ids[k] == id) known = true;
+                            if(!known && id > 0 && app->logged_count < MAX_LOGGED_IDS) {
+                                app->logged_ids[app->logged_count++] = id;
+                                if(app->selected_index < 0) app->selected_index = 0;
+                                notification_message(app->notifications, &sequence_blink_green_100);
                             }
+                            app->total_packets++;
                         }
+                        p_idx = (p_idx + 1) % 47;
                         state = DecodeStateIdle;
+                        if(!bit) { state = DecodeStateData; bit_acc = 0; bits = 0; }
                     }
                 }
             }
