@@ -135,7 +135,14 @@ The badge now has a "passive" interaction mode. When it receives a packet from a
 
 ## Flipper Zero Application
 
-A custom Flipper Zero app (`cy9_greet`) is included to interact with the badge's IR protocol. It allows you to broadcast a greeting from your Flipper Zero, which will appear on nearby badges as being from your Flipper's unique name (e.g., `M3m0ry`).
+The project includes a custom Flipper Zero app (**Cy9 Remote**) which acts as a "Universal Remote" for CypherCon 9 badges. It uses the Flipper's IR hardware to interact with the badge protocol.
+
+### Features
+- **Quick Greet**: Broadcast a greeting message using your Flipper's unique name.
+- **Spoof Founder**: Broadcast a message as "ID 1", appearing as a Founder badge.
+- **Inbox Nuke**: Rapidly send multiple messages to fill up a target's 32-slot inbox.
+- **Chaos Mode**: Rapidly broadcast from multiple different IDs to fill the social memory of nearby badges.
+- **Sniffer**: Listen for incoming IR packets. Displays a pulse count when badge activity is detected.
 
 ### Compiling and Installing
 
@@ -150,9 +157,9 @@ A custom Flipper Zero app (`cy9_greet`) is included to interact with the badge's
    ufbt launch
    ```
 3. **Manual Install**:
-   If `ufbt launch` fails to find your device, you can manually copy the compiled `.fap` file:
-   - File location: `flipper-app/dist/cy9_greet.fap`
-   - Destination: Flipper SD Card `/apps/Infrared/cy9_greet.fap`
+   Copy the compiled `.fap` file:
+   - File location: `flipper-app/dist/cy9_remote.fap`
+   - Destination: Flipper SD Card `/apps/Infrared/cy9_remote.fap`
 
 ### Using the App
-Open **Apps > Infrared > Cy9 Greeter** on your Flipper Zero. Point it at a badge and press **OK** to send the greeting.
+Open **Apps > Infrared > Cy9 Remote** on your Flipper Zero. Use the menu to select an action and press **OK**. Use the **Back** button to return to the menu from the Sniffer view.
