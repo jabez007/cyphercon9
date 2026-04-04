@@ -102,7 +102,7 @@ void cy9_load_settings(Cy9RemoteApp* app) {
     } else {
         snprintf(app->greet_msg, 17, "Greetz from Cy9!");
         snprintf(app->founder_msg, 17, "Obey the system.");
-        app->selected_class = Cy9ClassGeneral;
+        app->selected_class = Cy9ClassExtreme;
     }
     storage_file_free(file);
     furi_record_close(RECORD_STORAGE);
