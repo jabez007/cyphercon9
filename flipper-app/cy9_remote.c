@@ -119,8 +119,13 @@ void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_
 static void sniffer_draw_callback(Canvas* canvas, void* context) {
     Cy9RemoteApp* app = context;
     if(!app) return;
+
+    canvas_clear(canvas);
+    canvas_set_color(canvas, ColorBlack);
+    
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 0, 10, "IR Sniffer Log");
+    
     canvas_set_font(canvas, FontSecondary);
     if(app->logged_count == 0) {
         canvas_draw_str(canvas, 0, 30, "Scanning for badges...");
@@ -135,7 +140,7 @@ static void sniffer_draw_callback(Canvas* canvas, void* context) {
                 canvas_draw_str(canvas, 10, 22 + (i * 10), buf);
             }
         }
-        canvas_draw_str(canvas, 85, 60, "OK: Greet");
+        canvas_draw_str(canvas, 80, 60, "OK: Greet");
     }
 }
 
@@ -145,9 +150,11 @@ static bool sniffer_input_callback(InputEvent* event, void* context) {
     if(event->type == InputTypeShort) {
         if(event->key == InputKeyDown) {
             if(app->logged_count > 0) app->selected_index = (app->selected_index + 1) % app->logged_count;
+            view_commit_model(app->sniffer_view, true);
             return true;
         } else if(event->key == InputKeyUp) {
             if(app->logged_count > 0) app->selected_index = (app->selected_index - 1 + app->logged_count) % app->logged_count;
+            view_commit_model(app->sniffer_view, true);
             return true;
         } else if(event->key == InputKeyOk && app->selected_index >= 0) {
             uint16_t target = app->logged_ids[app->selected_index];
@@ -166,11 +173,12 @@ static void cy9_rx_capture_callback(void* context, bool level, uint32_t duration
     furi_message_queue_put(app->rx_queue, &msg, 0);
 }
 
+typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
+
 static int32_t cy9_rx_thread(void* context) {
     Cy9RemoteApp* app = context;
     if(!app) return -1;
     Cy9RxMessage msg;
-    typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
     DecodeState state = DecodeStateIdle;
     uint32_t bit_acc = 0, bits = 0;
     uint8_t pkt_circ[47] = {0};
@@ -197,6 +205,8 @@ static int32_t cy9_rx_thread(void* context) {
                                 app->logged_ids[app->logged_count++] = id;
                                 if(app->selected_index < 0) app->selected_index = 0;
                                 if(app->notifications) notification_message(app->notifications, &sequence_blink_green_100);
+                                // Trigger UI update to show the new ID
+                                view_commit_model(app->sniffer_view, true);
                             }
                             app->total_packets++;
                         }
@@ -261,6 +271,7 @@ int32_t cy9_remote_app(void* p) {
     view_dispatcher_set_navigation_event_callback(app->view_dispatcher, cy9_navigation_callback);
 
     app->submenu = submenu_alloc();
+    furi_check(app->submenu);
     submenu_set_header(app->submenu, "Cy9 Remote");
     submenu_add_item(app->submenu, "Quick Greet", 0, submenu_callback, app);
     submenu_add_item(app->submenu, "Spoof Founder", 1, submenu_callback, app);
@@ -269,6 +280,7 @@ int32_t cy9_remote_app(void* p) {
     submenu_add_item(app->submenu, "Sniffer Log", 4, submenu_callback, app);
     
     app->sniffer_view = view_alloc();
+    furi_check(app->sniffer_view);
     view_set_draw_callback(app->sniffer_view, sniffer_draw_callback);
     view_set_input_callback(app->sniffer_view, sniffer_input_callback);
     view_set_context(app->sniffer_view, app);
