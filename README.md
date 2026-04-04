@@ -129,10 +129,6 @@ When the badge is idle with no unread messages, the LEDs perform a repeating lig
 
 The mail notification (LED rotate) still takes priority when unread messages exist. The light show is distinct from the mail indicator so you can tell them apart at a glance.
 
-### Auto-Greeting (New)
-
-The badge now has a "passive" interaction mode. When it receives a packet from another badge, it will automatically respond with a broadcast greeting (`Greetz from Cy9!`) if it hasn't greeted that specific badge ID in the last 5 minutes. This feature helps you discover other badges at the conference without manual interaction.
-
 ## Flipper Zero Application
 
 The project includes a custom Flipper Zero app (**Cy9 Remote**) which acts as a "Universal Remote" for CypherCon 9 badges. It uses the Flipper's IR hardware to interact with the badge protocol.

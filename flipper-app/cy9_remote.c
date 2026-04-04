@@ -4,6 +4,7 @@
 #include <gui/gui.h>
 #include <gui/view_dispatcher.h>
 #include <gui/modules/submenu.h>
+#include <gui/modules/text_input.h>
 #include <notification/notification_messages.h>
 
 /*
@@ -22,6 +23,7 @@
 typedef enum {
     Cy9ViewSubmenu,
     Cy9ViewSniffer,
+    Cy9ViewTextInput,
 } Cy9View;
 
 typedef struct {
@@ -47,12 +49,17 @@ typedef struct {
     ViewDispatcher* view_dispatcher;
     Submenu* submenu;
     View* sniffer_view;
+    TextInput* text_input;
     NotificationApp* notifications;
     
     FuriThread* rx_thread;
     FuriMessageQueue* rx_queue;
     
     Cy9Burst* tx_burst;
+    char greet_msg[17];
+    char founder_msg[17];
+    char text_input_buf[17];
+    
     volatile bool sniffing;
     volatile bool rx_active;
     volatile bool running;
@@ -174,7 +181,7 @@ static bool sniffer_input_callback(InputEvent* event, void* context) {
                 }
             }, false);
             if(has_target) {
-                cy9_send_packet(app, 1, target, 3, "Flipper", "I see you! :)");
+                cy9_send_packet(app, 1, target, 3, "Flipper", app->greet_msg);
                 notification_message(app->notifications, &sequence_blink_blue_100);
             }
             return true;
@@ -238,6 +245,11 @@ static int32_t cy9_rx_thread(void* context) {
     return 0;
 }
 
+static void text_input_done_callback(void* context) {
+    Cy9RemoteApp* app = context;
+    view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewSubmenu);
+}
+
 static void submenu_callback(void* context, uint32_t index) {
     Cy9RemoteApp* app = context;
     if(!app) return;
@@ -247,10 +259,15 @@ static void submenu_callback(void* context, uint32_t index) {
         furi_hal_infrared_async_rx_set_capture_isr_callback(cy9_rx_capture_callback, app);
         furi_hal_infrared_async_rx_start();
         view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewSniffer);
+    } else if(index == 5 || index == 6) {
+        char* target = (index == 5) ? app->greet_msg : app->founder_msg;
+        text_input_set_header_text(app->text_input, (index == 5) ? "Greet Msg" : "Founder Msg");
+        text_input_set_result_callback(app->text_input, text_input_done_callback, app, target, 17, true);
+        view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewTextInput);
     } else {
         const char* name = furi_hal_version_get_name_ptr();
-        if(index == 0) cy9_send_packet(app, 1, 0, 3, name ? name : "Flipper", "Quick Greet!");
-        else if(index == 1) cy9_send_packet(app, 1, 0, 3, "FOUNDER", "Obey.");
+        if(index == 0) cy9_send_packet(app, 1, 0, 3, name ? name : "Flipper", app->greet_msg);
+        else if(index == 1) cy9_send_packet(app, 1, 0, 3, "FOUNDER", app->founder_msg);
         else if(index == 2) for(int i=0; i<5; i++) cy9_send_packet(app, 0, 0, 4, "NUKE", "Flood...");
         else if(index == 3) for(int i=1; i<6; i++) cy9_send_packet(app, i, 0, 4, "CHAOS", "Flood...");
         notification_message(app->notifications, &sequence_blink_blue_100);
@@ -277,6 +294,9 @@ int32_t cy9_remote_app(void* p) {
     furi_check(app);
     memset(app, 0, sizeof(Cy9RemoteApp));
     
+    snprintf(app->greet_msg, 17, "Greetz from Cy9!");
+    snprintf(app->founder_msg, 17, "Obey the system.");
+
     app->tx_burst = malloc(sizeof(Cy9Burst));
     furi_check(app->tx_burst);
     memset(app->tx_burst, 0, sizeof(Cy9Burst));
@@ -301,6 +321,8 @@ int32_t cy9_remote_app(void* p) {
     submenu_add_item(app->submenu, "Inbox Nuke", 2, submenu_callback, app);
     submenu_add_item(app->submenu, "Chaos Mode", 3, submenu_callback, app);
     submenu_add_item(app->submenu, "Sniffer Log", 4, submenu_callback, app);
+    submenu_add_item(app->submenu, "Config Greet", 5, submenu_callback, app);
+    submenu_add_item(app->submenu, "Config Founder", 6, submenu_callback, app);
     
     app->sniffer_view = view_alloc();
     furi_check(app->sniffer_view);
@@ -310,8 +332,12 @@ int32_t cy9_remote_app(void* p) {
     view_set_input_callback(app->sniffer_view, sniffer_input_callback);
     view_set_context(app->sniffer_view, app);
     
+    app->text_input = text_input_alloc();
+    furi_check(app->text_input);
+
     view_dispatcher_add_view(app->view_dispatcher, Cy9ViewSubmenu, submenu_get_view(app->submenu));
     view_dispatcher_add_view(app->view_dispatcher, Cy9ViewSniffer, app->sniffer_view);
+    view_dispatcher_add_view(app->view_dispatcher, Cy9ViewTextInput, text_input_get_view(app->text_input));
     view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewSubmenu);
     
     app->rx_thread = furi_thread_alloc_ex("Cy9Rx", 2048, cy9_rx_thread, app);
@@ -333,8 +359,10 @@ int32_t cy9_remote_app(void* p) {
     
     view_dispatcher_remove_view(app->view_dispatcher, Cy9ViewSubmenu);
     view_dispatcher_remove_view(app->view_dispatcher, Cy9ViewSniffer);
+    view_dispatcher_remove_view(app->view_dispatcher, Cy9ViewTextInput);
     submenu_free(app->submenu);
     view_free(app->sniffer_view);
+    text_input_free(app->text_input);
     view_dispatcher_free(app->view_dispatcher);
     furi_record_close(RECORD_GUI);
     furi_record_close(RECORD_NOTIFICATION);
