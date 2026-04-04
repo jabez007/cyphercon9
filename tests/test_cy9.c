@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <math.h>
+#include <stdlib.h>
 
 #define BAUD_RATE 3000
 #define BIT_TIME_US_FLOAT (1000000.0f / (float)BAUD_RATE)
