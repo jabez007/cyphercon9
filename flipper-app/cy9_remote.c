@@ -11,7 +11,6 @@
  * - 38kHz Carrier
  * - 3000 Baud
  * - 8N1 (Start=0, 8 Data LSB-first, Stop=1)
- * - UART LOW = IR ON | UART HIGH = IR OFF
  */
 
 #define BAUD_RATE 3000
@@ -54,7 +53,7 @@ static Cy9Burst global_burst;
 
 static FuriHalInfraredTxGetDataState cy9_tx_callback(void* context, uint32_t* duration, bool* level) {
     Cy9Burst* b = (Cy9Burst*)context;
-    if(b->index >= b->count) return FuriHalInfraredTxGetDataStateLastDone;
+    if(!b || b->index >= b->count) return FuriHalInfraredTxGetDataStateLastDone;
     *duration = b->durations[b->index];
     *level = (b->index % 2 == 0); 
     b->index++;
@@ -74,8 +73,8 @@ static void cy9_add_duration(uint32_t duration, bool level, uint32_t* current_du
     }
 }
 
-void cy9_send_packet(uint16_t from_id, uint16_t to_id, uint8_t event_id, const char* alias, const char* msg) {
-    if(furi_hal_infrared_is_busy()) return;
+void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_t event_id, const char* alias, const char* msg) {
+    if(!app || furi_hal_infrared_is_busy()) return;
     uint8_t packet[47] = {0};
     uint16_t body_len = 32;
     packet[0] = 22; packet[1] = 22; packet[2] = 22; packet[3] = 22;
@@ -86,16 +85,21 @@ void cy9_send_packet(uint16_t from_id, uint16_t to_id, uint8_t event_id, const c
     
     char alias_buf[16], msg_buf[16];
     memset(alias_buf, ' ', 16); memset(msg_buf, ' ', 16);
-    size_t name_len = strlen(alias);
-    memcpy(alias_buf, alias, (name_len > 16) ? 16 : name_len);
-    size_t msg_len = strlen(msg);
-    memcpy(msg_buf, msg, (msg_len > 16) ? 16 : msg_len);
+    if(alias) {
+        size_t len = strlen(alias);
+        memcpy(alias_buf, alias, (len > 16) ? 16 : len);
+    }
+    if(msg) {
+        size_t len = strlen(msg);
+        memcpy(msg_buf, msg, (len > 16) ? 16 : len);
+    }
     memcpy(&packet[15], alias_buf, 16); memcpy(&packet[31], msg_buf, 16);
     
     uint32_t tally = 0;
     for(int i = 8; i < 47; i++) tally += packet[i];
     packet[4] = (tally >> 24) & 0xFF; packet[5] = (tally >> 16) & 0xFF;
     packet[6] = (tally >> 8) & 0xFF; packet[7] = tally & 0xFF;
+    
     global_burst.count = 0; global_burst.index = 0;
     uint32_t current_duration = 0; bool current_level = false; uint32_t last_time_us = 0;
     for(uint32_t bit_idx = 0; bit_idx < 47 * 10; bit_idx++) {
@@ -114,6 +118,7 @@ void cy9_send_packet(uint16_t from_id, uint16_t to_id, uint8_t event_id, const c
 
 static void sniffer_draw_callback(Canvas* canvas, void* context) {
     Cy9RemoteApp* app = context;
+    if(!app) return;
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 0, 10, "IR Sniffer Log");
     canvas_set_font(canvas, FontSecondary);
@@ -136,6 +141,7 @@ static void sniffer_draw_callback(Canvas* canvas, void* context) {
 
 static bool sniffer_input_callback(InputEvent* event, void* context) {
     Cy9RemoteApp* app = context;
+    if(!app) return false;
     if(event->type == InputTypeShort) {
         if(event->key == InputKeyDown) {
             if(app->logged_count > 0) app->selected_index = (app->selected_index + 1) % app->logged_count;
@@ -145,7 +151,7 @@ static bool sniffer_input_callback(InputEvent* event, void* context) {
             return true;
         } else if(event->key == InputKeyOk && app->selected_index >= 0) {
             uint16_t target = app->logged_ids[app->selected_index];
-            cy9_send_packet(1, target, 3, "Flipper", "I see you! :)");
+            cy9_send_packet(app, 1, target, 3, "Flipper", "I see you! :)");
             notification_message(app->notifications, &sequence_blink_blue_100);
             return true;
         }
@@ -155,16 +161,16 @@ static bool sniffer_input_callback(InputEvent* event, void* context) {
 
 static void cy9_rx_capture_callback(void* context, bool level, uint32_t duration) {
     Cy9RemoteApp* app = context;
-    if(!app->sniffing) return;
+    if(!app || !app->sniffing || !app->rx_queue) return;
     Cy9RxMessage msg = {level, duration};
     furi_message_queue_put(app->rx_queue, &msg, 0);
 }
 
-typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
-
 static int32_t cy9_rx_thread(void* context) {
     Cy9RemoteApp* app = context;
+    if(!app) return -1;
     Cy9RxMessage msg;
+    typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
     DecodeState state = DecodeStateIdle;
     uint32_t bit_acc = 0, bits = 0;
     uint8_t pkt_circ[47] = {0};
@@ -176,7 +182,6 @@ static int32_t cy9_rx_thread(void* context) {
             bool bit = !msg.level;
             int n = (int)(( (float)msg.duration + (BIT_TIME_US / 2.0f) ) / BIT_TIME_US);
             if(n <= 0) n = 1;
-            
             for(int i = 0; i < n; i++) {
                 if(state == DecodeStateIdle) {
                     if(!bit) { state = DecodeStateData; bit_acc = 0; bits = 0; }
@@ -191,7 +196,7 @@ static int32_t cy9_rx_thread(void* context) {
                             if(!known && id > 0 && app->logged_count < MAX_LOGGED_IDS) {
                                 app->logged_ids[app->logged_count++] = id;
                                 if(app->selected_index < 0) app->selected_index = 0;
-                                notification_message(app->notifications, &sequence_blink_green_100);
+                                if(app->notifications) notification_message(app->notifications, &sequence_blink_green_100);
                             }
                             app->total_packets++;
                         }
@@ -208,23 +213,25 @@ static int32_t cy9_rx_thread(void* context) {
 
 static void submenu_callback(void* context, uint32_t index) {
     Cy9RemoteApp* app = context;
+    if(!app) return;
     if(index == 4) {
         app->sniffing = true;
         furi_hal_infrared_async_rx_set_capture_isr_callback(cy9_rx_capture_callback, app);
         furi_hal_infrared_async_rx_start();
         view_dispatcher_switch_to_view(app->view_dispatcher, 1);
     } else {
-        if(index == 0) cy9_send_packet(1, 0, 3, "Flipper", "Quick Greet!");
-        else if(index == 1) cy9_send_packet(1, 0, 3, "FOUNDER", "Obey.");
-        else if(index == 2) for(int i=0; i<5; i++) cy9_send_packet(0, 0, 4, "NUKE", "Flood...");
-        else if(index == 3) for(int i=1; i<6; i++) cy9_send_packet(i, 0, 4, "CHAOS", "Flood...");
-        notification_message(app->notifications, &sequence_blink_blue_100);
+        const char* name = furi_hal_version_get_name_ptr();
+        if(index == 0) cy9_send_packet(app, 1, 0, 3, name ? name : "Flipper", "Quick Greet!");
+        else if(index == 1) cy9_send_packet(app, 1, 0, 3, "FOUNDER", "Obey.");
+        else if(index == 2) for(int i=0; i<5; i++) cy9_send_packet(app, 0, 0, 4, "NUKE", "Flood...");
+        else if(index == 3) for(int i=1; i<6; i++) cy9_send_packet(app, i, 0, 4, "CHAOS", "Flood...");
+        if(app->notifications) notification_message(app->notifications, &sequence_blink_blue_100);
     }
 }
 
 static bool cy9_navigation_callback(void* context) {
     Cy9RemoteApp* app = context;
-    if(app->sniffing) {
+    if(app && app->sniffing) {
         app->sniffing = false;
         furi_hal_infrared_async_rx_stop();
         view_dispatcher_switch_to_view(app->view_dispatcher, 0);
@@ -237,28 +244,23 @@ int32_t cy9_remote_app(void* p) {
     UNUSED(p);
     Cy9RemoteApp* app = malloc(sizeof(Cy9RemoteApp));
     furi_check(app);
+    memset(app, 0, sizeof(Cy9RemoteApp));
     
     app->gui = furi_record_open(RECORD_GUI);
-    furi_check(app->gui);
     app->notifications = furi_record_open(RECORD_NOTIFICATION);
-    furi_check(app->notifications);
-    
-    app->logged_count = 0;
-    app->selected_index = -1;
-    app->sniffing = false;
-    app->running = true;
     app->rx_queue = furi_message_queue_alloc(128, sizeof(Cy9RxMessage));
-    furi_check(app->rx_queue);
+    furi_check(app->gui && app->notifications && app->rx_queue);
+    
+    app->selected_index = -1;
+    app->running = true;
     
     app->view_dispatcher = view_dispatcher_alloc();
     furi_check(app->view_dispatcher);
-    view_dispatcher_enable_queue(app->view_dispatcher);
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
-    view_dispatcher_set_navigation_event_callback(app->view_dispatcher, cy9_navigation_callback);
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
+    view_dispatcher_set_navigation_event_callback(app->view_dispatcher, cy9_navigation_callback);
 
     app->submenu = submenu_alloc();
-    furi_check(app->submenu);
     submenu_set_header(app->submenu, "Cy9 Remote");
     submenu_add_item(app->submenu, "Quick Greet", 0, submenu_callback, app);
     submenu_add_item(app->submenu, "Spoof Founder", 1, submenu_callback, app);
@@ -267,7 +269,6 @@ int32_t cy9_remote_app(void* p) {
     submenu_add_item(app->submenu, "Sniffer Log", 4, submenu_callback, app);
     
     app->sniffer_view = view_alloc();
-    furi_check(app->sniffer_view);
     view_set_draw_callback(app->sniffer_view, sniffer_draw_callback);
     view_set_input_callback(app->sniffer_view, sniffer_input_callback);
     view_set_context(app->sniffer_view, app);
@@ -282,8 +283,8 @@ int32_t cy9_remote_app(void* p) {
     furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
     view_dispatcher_run(app->view_dispatcher);
     
-    app->sniffing = false;
     app->running = false;
+    app->sniffing = false;
     furi_hal_infrared_async_rx_stop();
     furi_thread_join(app->rx_thread);
     furi_thread_free(app->rx_thread);
