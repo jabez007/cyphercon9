@@ -10,9 +10,10 @@
 #define BIT_TIME_US_FLOAT (1000000.0f / (float)BAUD_RATE)
 #define MAX_EDGES 5000
 
-// Custom Badge Font Icons
-#define ICON_DIAMOND 0x0F
-#define ICON_CIRCLE  0x10
+// Custom Badge Font Icons (Corrected)
+#define ICON_HEART   0x0F
+#define ICON_SPADE   0x10
+#define ICON_DIAMOND 0x12
 
 typedef enum {
     Cy9ClassGhost, Cy9ClassFounder, Cy9ClassExtreme, Cy9ClassLifetime,
@@ -62,13 +63,13 @@ void build_packet(uint8_t* packet, uint16_t from_id, const char* alias, const ch
         if(len > 14) len = 14;
         memcpy(alias_buf, alias, len);
         
-        // Icon Injection Logic (from cy9_remote.c)
+        // Correct Icon Injection Logic
         if(from_id >= 1 && from_id <= 25) { // Founder
             alias_buf[len] = ' ';
             alias_buf[len+1] = ICON_DIAMOND;
         } else if(from_id >= 26 && from_id <= 100) { // Extreme
             alias_buf[len] = ' ';
-            alias_buf[len+1] = ICON_CIRCLE;
+            alias_buf[len+1] = ICON_SPADE;
         }
     }
     
@@ -174,7 +175,7 @@ void test_space_padding() {
     build_packet(packet, 1, "Hi", "Bye");
     assert(packet[15] == 'H' && packet[16] == 'i');
     assert(packet[17] == ' '); // separator
-    assert(packet[18] == ICON_DIAMOND); // ID 1 is Founder
+    assert(packet[18] == ICON_DIAMOND); // ID 1 is Founder (Diamond)
     for(int i = 19; i < 31; i++) assert(packet[i] == 0x20);
     printf("   ✓ 0x20 Space padding and Icon injection verified!\n");
 }
@@ -207,22 +208,22 @@ void test_icon_injection() {
     printf("6. Testing Icon Injection Logic...\n");
     uint8_t pkt[47];
     
-    // Founder test (ID 1..25)
+    // Founder test (ID 1..25) -> ICON_DIAMOND (0x12)
     build_packet(pkt, 1, "M3m0ry", "Hi");
     assert(pkt[15+6] == ' ');
     assert(pkt[15+7] == ICON_DIAMOND);
     
-    // Extreme test (ID 26..100)
+    // Extreme test (ID 26..100) -> ICON_SPADE (0x10)
     build_packet(pkt, 50, "M3m0ry", "Hi");
     assert(pkt[15+6] == ' ');
-    assert(pkt[15+7] == ICON_CIRCLE);
+    assert(pkt[15+7] == ICON_SPADE);
     
-    // Regular test (ID 221+)
+    // Regular test (ID 221+) -> No icon
     build_packet(pkt, 221, "M3m0ry", "Hi");
     assert(pkt[15+6] == ' ');
-    assert(pkt[15+7] == ' '); // No icon for regular class
+    assert(pkt[15+7] == ' '); 
     
-    printf("   ✓ Icon injection for elevated classes verified!\n");
+    printf("   ✓ Correct icons injected for elevated classes!\n");
 }
 
 void test_full_loopback() {

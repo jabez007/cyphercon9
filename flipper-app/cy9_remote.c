@@ -9,6 +9,13 @@
 #include <notification/notification_messages.h>
 #include <storage/storage.h>
 
+/*
+ * CY9 IR Protocol Specs:
+ * - 38kHz Carrier
+ * - 3000 Baud
+ * - 8N1 (Start=0, 8 Data LSB-first, Stop=1)
+ */
+
 #define BAUD_RATE 3000
 #define BIT_TIME_US (1000000 / BAUD_RATE)
 #define CARRIER_FREQ 38000
@@ -17,9 +24,9 @@
 #define SETTINGS_PATH "/ext/apps/Infrared/cy9_remote.settings"
 
 // Custom Badge Font Icons
-#define ICON_DIAMOND 0x0F
-#define ICON_CIRCLE  0x10
-#define ICON_CHECK   0x11
+#define ICON_HEART   0x0F
+#define ICON_SPADE   0x10
+#define ICON_DIAMOND 0x12
 
 typedef enum {
     Cy9ViewSubmenu,
@@ -158,37 +165,30 @@ void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_
     packet[10] = event_id;
     packet[11] = (from_id >> 8) & 0xFF; packet[12] = from_id & 0xFF;
     packet[13] = (to_id >> 8) & 0xFF; packet[14] = to_id & 0xFF;
-    
     char alias_buf[16], msg_buf[16];
     memset(alias_buf, ' ', 16); memset(msg_buf, ' ', 16);
     
-    // Auto-Icon Injection based on sender ID range
     if(alias) {
         size_t len = strlen(alias);
-        if(len > 14) len = 14; // Leave room for space + icon
+        if(len > 14) len = 14;
         memcpy(alias_buf, alias, len);
         
-        // Add special icon for elevated statuses
+        // Correct Icon Injection Logic
         if(from_id >= 1 && from_id <= 25) { // Founder
             alias_buf[len] = ' ';
             alias_buf[len+1] = ICON_DIAMOND;
         } else if(from_id >= 26 && from_id <= 100) { // Extreme
             alias_buf[len] = ' ';
-            alias_buf[len+1] = ICON_CIRCLE;
+            alias_buf[len+1] = ICON_SPADE;
         }
     }
     
-    if(msg) {
-        size_t len = strlen(msg);
-        memcpy(msg_buf, msg, (len > 16) ? 16 : len);
-    }
+    if(msg) memcpy(msg_buf, msg, (strlen(msg) > 16) ? 16 : strlen(msg));
     memcpy(&packet[15], alias_buf, 16); memcpy(&packet[31], msg_buf, 16);
-    
     uint32_t tally = 0;
     for(int i = 8; i < 47; i++) tally += packet[i];
     packet[4] = (tally >> 24) & 0xFF; packet[5] = (tally >> 16) & 0xFF;
     packet[6] = (tally >> 8) & 0xFF; packet[7] = tally & 0xFF;
-    
     app->tx_burst->count = 0; app->tx_burst->index = 0;
     uint32_t current_duration = 0; bool current_level = false; uint32_t last_time_us = 0;
     for(uint32_t bit_idx = 0; bit_idx < 47 * 10; bit_idx++) {
