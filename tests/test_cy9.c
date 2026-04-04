@@ -116,6 +116,20 @@ uint16_t sniffer_decode(EdgeStream* stream) {
 
 // --- NEW TESTS ---
 
+void test_packet_logic() {
+    printf("Testing Packet Logic...\n");
+    uint8_t packet[47];
+    build_packet(packet, 221, "Flipper", "Hello");
+    // Verify Checksum
+    uint32_t tally = 0;
+    for(int i = 8; i < 47; i++) tally += packet[i];
+    uint32_t pkt_tally = (packet[4] << 24) | (packet[5] << 16) | (packet[6] << 8) | packet[7];
+    assert(tally == pkt_tally);
+    // Verify ID packing
+    assert(packet[11] == 0 && packet[12] == 221);
+    printf("  ✓ Checksum and ID packing passed!\n");
+}
+
 void test_identity_randomization() {
     printf("Testing Identity Randomization Ranges...\n");
     for(int i = 0; i < 100; i++) {
@@ -172,6 +186,7 @@ void test_full_loopback() {
 int main() {
     srand(42); // Seed for deterministic random testing
     printf("=== Cy9 Universal Remote: Advanced Test Suite ===\n\n");
+    test_packet_logic();
     test_identity_randomization();
     test_space_padding();
     test_timing_accuracy();
