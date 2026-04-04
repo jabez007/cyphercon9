@@ -19,6 +19,11 @@
 #define MAX_DURATIONS 1000
 #define MAX_LOGGED_IDS 10
 
+typedef enum {
+    Cy9ViewSubmenu,
+    Cy9ViewSniffer,
+} Cy9View;
+
 typedef struct {
     uint32_t durations[MAX_DURATIONS];
     uint32_t count;
@@ -119,13 +124,10 @@ void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_
 static void sniffer_draw_callback(Canvas* canvas, void* context) {
     Cy9RemoteApp* app = context;
     if(!app) return;
-
     canvas_clear(canvas);
     canvas_set_color(canvas, ColorBlack);
-    
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 0, 10, "IR Sniffer Log");
-    
     canvas_set_font(canvas, FontSecondary);
     if(app->logged_count == 0) {
         canvas_draw_str(canvas, 0, 30, "Scanning for badges...");
@@ -173,12 +175,11 @@ static void cy9_rx_capture_callback(void* context, bool level, uint32_t duration
     furi_message_queue_put(app->rx_queue, &msg, 0);
 }
 
-typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
-
 static int32_t cy9_rx_thread(void* context) {
     Cy9RemoteApp* app = context;
     if(!app) return -1;
     Cy9RxMessage msg;
+    typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
     DecodeState state = DecodeStateIdle;
     uint32_t bit_acc = 0, bits = 0;
     uint8_t pkt_circ[47] = {0};
@@ -205,7 +206,6 @@ static int32_t cy9_rx_thread(void* context) {
                                 app->logged_ids[app->logged_count++] = id;
                                 if(app->selected_index < 0) app->selected_index = 0;
                                 if(app->notifications) notification_message(app->notifications, &sequence_blink_green_100);
-                                // Trigger UI update to show the new ID
                                 view_commit_model(app->sniffer_view, true);
                             }
                             app->total_packets++;
@@ -228,7 +228,7 @@ static void submenu_callback(void* context, uint32_t index) {
         app->sniffing = true;
         furi_hal_infrared_async_rx_set_capture_isr_callback(cy9_rx_capture_callback, app);
         furi_hal_infrared_async_rx_start();
-        view_dispatcher_switch_to_view(app->view_dispatcher, 1);
+        view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewSniffer);
     } else {
         const char* name = furi_hal_version_get_name_ptr();
         if(index == 0) cy9_send_packet(app, 1, 0, 3, name ? name : "Flipper", "Quick Greet!");
@@ -244,10 +244,10 @@ static bool cy9_navigation_callback(void* context) {
     if(app && app->sniffing) {
         app->sniffing = false;
         furi_hal_infrared_async_rx_stop();
-        view_dispatcher_switch_to_view(app->view_dispatcher, 0);
-        return true;
+        view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewSubmenu);
+        return true; // We handled the event
     }
-    return false;
+    return false; // Exit app
 }
 
 int32_t cy9_remote_app(void* p) {
@@ -266,12 +266,12 @@ int32_t cy9_remote_app(void* p) {
     
     app->view_dispatcher = view_dispatcher_alloc();
     furi_check(app->view_dispatcher);
+    view_dispatcher_enable_queue(app->view_dispatcher);
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_navigation_event_callback(app->view_dispatcher, cy9_navigation_callback);
 
     app->submenu = submenu_alloc();
-    furi_check(app->submenu);
     submenu_set_header(app->submenu, "Cy9 Remote");
     submenu_add_item(app->submenu, "Quick Greet", 0, submenu_callback, app);
     submenu_add_item(app->submenu, "Spoof Founder", 1, submenu_callback, app);
@@ -280,14 +280,13 @@ int32_t cy9_remote_app(void* p) {
     submenu_add_item(app->submenu, "Sniffer Log", 4, submenu_callback, app);
     
     app->sniffer_view = view_alloc();
-    furi_check(app->sniffer_view);
     view_set_draw_callback(app->sniffer_view, sniffer_draw_callback);
     view_set_input_callback(app->sniffer_view, sniffer_input_callback);
     view_set_context(app->sniffer_view, app);
     
-    view_dispatcher_add_view(app->view_dispatcher, 0, submenu_get_view(app->submenu));
-    view_dispatcher_add_view(app->view_dispatcher, 1, app->sniffer_view);
-    view_dispatcher_switch_to_view(app->view_dispatcher, 0);
+    view_dispatcher_add_view(app->view_dispatcher, Cy9ViewSubmenu, submenu_get_view(app->submenu));
+    view_dispatcher_add_view(app->view_dispatcher, Cy9ViewSniffer, app->sniffer_view);
+    view_dispatcher_switch_to_view(app->view_dispatcher, Cy9ViewSubmenu);
     
     app->rx_thread = furi_thread_alloc_ex("Cy9Rx", 2048, cy9_rx_thread, app);
     furi_thread_start(app->rx_thread);
@@ -295,15 +294,19 @@ int32_t cy9_remote_app(void* p) {
     furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
     view_dispatcher_run(app->view_dispatcher);
     
+    // Defensive exit logic
     app->running = false;
-    app->sniffing = false;
-    furi_hal_infrared_async_rx_stop();
+    if(app->sniffing) {
+        app->sniffing = false;
+        furi_hal_infrared_async_rx_stop();
+    }
+    
     furi_thread_join(app->rx_thread);
     furi_thread_free(app->rx_thread);
     furi_message_queue_free(app->rx_queue);
     
-    view_dispatcher_remove_view(app->view_dispatcher, 0);
-    view_dispatcher_remove_view(app->view_dispatcher, 1);
+    view_dispatcher_remove_view(app->view_dispatcher, Cy9ViewSubmenu);
+    view_dispatcher_remove_view(app->view_dispatcher, Cy9ViewSniffer);
     submenu_free(app->submenu);
     view_free(app->sniffer_view);
     view_dispatcher_free(app->view_dispatcher);
