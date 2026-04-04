@@ -142,7 +142,8 @@ The project includes a custom Flipper Zero app (**Cy9 Remote**) which acts as a 
 - **Spoof Founder**: Broadcast a message as "ID 1", appearing as a Founder badge.
 - **Inbox Nuke**: Rapidly send multiple messages to fill up a target's 32-slot inbox.
 - **Chaos Mode**: Rapidly broadcast from multiple different IDs to fill the social memory of nearby badges.
-- **Sniffer**: Listen for incoming IR packets. Displays a pulse count when badge activity is detected.
+- **Sniffer Log**: Listen for incoming IR packets and decode Badge IDs. Maintains a log of the last 10 unique IDs seen.
+- **Targeted Interaction**: Select an ID from the sniffer log and press **OK** to send a direct greeting to that specific badge.
 
 ### Compiling and Installing
 
@@ -162,4 +163,9 @@ The project includes a custom Flipper Zero app (**Cy9 Remote**) which acts as a 
    - Destination: Flipper SD Card `/apps/Infrared/cy9_remote.fap`
 
 ### Using the App
-Open **Apps > Infrared > Cy9 Remote** on your Flipper Zero. Use the menu to select an action and press **OK**. Use the **Back** button to return to the menu from the Sniffer view.
+Open **Apps > Infrared > Cy9 Remote** on your Flipper Zero. Use the menu to select an action and press **OK**. 
+
+In the **Sniffer Log** view:
+- Use **Up/Down** to scroll through the list of captured Badge IDs.
+- Press **OK** to send a targeted greeting to the selected ID.
+- Use the **Back** button to return to the main menu.
