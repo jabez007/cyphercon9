@@ -167,22 +167,16 @@ void cy9_send_packet(Cy9RemoteApp* app, uint16_t from_id, uint16_t to_id, uint8_
     packet[13] = (to_id >> 8) & 0xFF; packet[14] = to_id & 0xFF;
     char alias_buf[16], msg_buf[16];
     memset(alias_buf, ' ', 16); memset(msg_buf, ' ', 16);
-    
     if(alias) {
         size_t len = strlen(alias);
         if(len > 14) len = 14;
         memcpy(alias_buf, alias, len);
-        
-        // Correct Icon Injection Logic
         if(from_id >= 1 && from_id <= 25) { // Founder
-            alias_buf[len] = ' ';
-            alias_buf[len+1] = ICON_DIAMOND;
+            alias_buf[len] = ' '; alias_buf[len+1] = ICON_DIAMOND;
         } else if(from_id >= 26 && from_id <= 100) { // Extreme
-            alias_buf[len] = ' ';
-            alias_buf[len+1] = ICON_SPADE;
+            alias_buf[len] = ' '; alias_buf[len+1] = ICON_SPADE;
         }
     }
-    
     if(msg) memcpy(msg_buf, msg, (strlen(msg) > 16) ? 16 : strlen(msg));
     memcpy(&packet[15], alias_buf, 16); memcpy(&packet[31], msg_buf, 16);
     uint32_t tally = 0;
@@ -217,9 +211,14 @@ static void sniffer_draw_callback(Canvas* canvas, void* model) {
     if(m->logged_count == 0) {
         canvas_draw_str(canvas, 0, 30, "Scanning for badges...");
     } else {
-        for(uint8_t i = 0; i < m->logged_count; i++) {
-            char buf[16]; snprintf(buf, 16, "Badge ID: %03d", m->logged_ids[i]);
-            if(i == m->selected_index) {
+        // Implement scrolling window (shows up to 4 entries)
+        uint8_t start_idx = 0;
+        if(m->selected_index >= 4) start_idx = m->selected_index - 3;
+        
+        for(uint8_t i = 0; i < 4 && (start_idx + i) < m->logged_count; i++) {
+            uint8_t curr = start_idx + i;
+            char buf[16]; snprintf(buf, 16, "Badge ID: %03d", m->logged_ids[curr]);
+            if(curr == m->selected_index) {
                 canvas_draw_str(canvas, 0, 22 + (i * 10), ">");
                 canvas_draw_str(canvas, 10, 22 + (i * 10), buf);
             } else {
@@ -264,11 +263,12 @@ static void cy9_rx_capture_callback(void* context, bool level, uint32_t duration
     furi_message_queue_put(app->rx_queue, &msg, 0);
 }
 
+typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
+
 static int32_t cy9_rx_thread(void* context) {
     Cy9RemoteApp* app = context;
     if(!app) return -1;
     Cy9RxMessage msg;
-    typedef enum { DecodeStateIdle, DecodeStateData } DecodeState;
     DecodeState state = DecodeStateIdle;
     uint32_t bit_acc = 0, bits = 0;
     uint8_t pkt_circ[47] = {0}, p_idx = 0;
@@ -286,11 +286,12 @@ static int32_t cy9_rx_thread(void* context) {
                     else {
                         pkt_circ[p_idx] = (uint8_t)bit_acc;
                         if(pkt_circ[p_idx] == 22) {
-                            uint16_t id = (pkt_circ[(p_idx + 47 - 11) % 47] << 8) | pkt_circ[(p_idx + 47 - 12) % 47];
+                            // CORRECTED BYTE ORDER: Index 12 is Lo, 11 is Hi in reversed wire stream
+                            uint16_t id = (pkt_circ[(p_idx + 47 - 12) % 47] << 8) | pkt_circ[(p_idx + 47 - 11) % 47];
                             bool known = false;
                             with_view_model(app->sniffer_view, Cy9SnifferModel * model, {
                                 for(int k=0; k<model->logged_count; k++) if(model->logged_ids[k] == id) known = true;
-                                if(!known && id > 0 && model->logged_count < MAX_LOGGED_IDS) {
+                                if(!known && id > 0 && id <= 675 && model->logged_count < MAX_LOGGED_IDS) {
                                     model->logged_ids[model->logged_count++] = id;
                                     if(model->selected_index < 0) model->selected_index = 0;
                                     notification_message(app->notifications, &sequence_blink_green_100);
